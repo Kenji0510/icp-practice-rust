@@ -13,6 +13,7 @@ use ndarray_linalg::{Determinant, SVD};
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
 const SAMPLE_SIZE: usize = 1000;
+const TRIM_PERCENTAGE: f64 = 0.9;
 
 fn main() -> Result<()> {
     let target_pcd_file_path = "data/input/clipped_Laser_map_5_voxel-01.pcd";
@@ -28,10 +29,32 @@ fn main() -> Result<()> {
     let mut source_pts = Points::new(source_d);
     println!("Loaded {} points from {}", source_pts.points.len(), source_pcd_file_path);
 
+    // OK
+    // let transform_matrix = array![
+    //     [0.959326, 0.282294, -0.002065, 2.249126],
+    //     [-0.282291, 0.959327, 0.001695, 0.171887],
+    //     [0.002459, -0.001043, 0.999996, -0.001295],
+    //     [0.000000, 0.000000, 0.000000, 1.000000],
+    // ];
+    // OK
+    // let transform_matrix = array![
+    //     [0.962047, 0.259369, -0.084812, 2.365178],
+    //     [-0.272116, 0.888537, -0.369399, 0.685336],
+    //     [-0.020452, 0.378457, 0.925393, 0.015746],
+    //     [0.000000, 0.000000, 0.000000, 1.000000],
+    // ];
+    // OK
+    // let transform_matrix = array![
+    //     [0.790851, 0.580114, 0.194992, 9.089207],
+    //     [-0.467640, 0.778335, -0.418935, -0.078562],
+    //     [-0.394800, 0.240130, 0.886832, -3.941626],
+    //     [0.000000, 0.000000, 0.000000, 1.000000],
+    // ];
+    // NG (Iteration 20, 100)
     let transform_matrix = array![
-        [0.959326, 0.282294, -0.002065, 2.249126],
-        [-0.282291, 0.959327, 0.001695, 0.171887],
-        [0.002459, -0.001043, 0.999996, -0.001295],
+        [-0.613723, 0.085265, 0.784904, 14.261620],
+        [-0.788805, -0.023871, -0.614180, -1.739003],
+        [-0.033632, -0.996072, 0.081908, -6.542201],
         [0.000000, 0.000000, 0.000000, 1.000000],
     ];
     source_pts.apply_transform(&transform_matrix);
@@ -39,8 +62,8 @@ fn main() -> Result<()> {
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
-    let max_iterations = 20;
-    let tolerance = 1e-5;
+    let max_iterations = 100;
+    let tolerance = 1e-3;
 
     let mut current_source_pts_arr = source_pts_arr.clone();
     let mut rng = thread_rng();
@@ -72,16 +95,43 @@ fn main() -> Result<()> {
             };
 
         // Find closest points
-        let (matched_target_pts, _) = find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree);
+        let (matched_target_pts, distance_sq) = find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree);
 
-        let (R, t) = calculate_transformation(&sampled_source_pts, &matched_target_pts);
+        let mut dist_with_indices: Vec<(f64, usize)> = distance_sq.iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, dist)| (dist, idx))
+            .collect();
+
+        dist_with_indices.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let n_to_keep = (dist_with_indices.len() as f64 * TRIM_PERCENTAGE) as usize;
+
+        let inlier_indices: Vec<usize> = dist_with_indices.iter()
+            .take(n_to_keep)
+            .map(|&(_dist, idx)| idx)
+            .collect();
+
+        let inlier_source_pts = sampled_source_pts.select(Axis(0), &inlier_indices);
+        let inlier_target_pts = matched_target_pts.select(Axis(0), &inlier_indices);
+
+        let (R, t) = calculate_transformation(&inlier_source_pts, &inlier_target_pts);
 
         current_source_pts_arr = current_source_pts_arr.dot(&R.t()) + &t;
 
-        let transformed_sampled_pts = current_source_pts_arr.select(Axis(0), &sampled_indices);
-        let current_error = calculate_mean_error(&transformed_sampled_pts, &matched_target_pts);
+        let transformed_inlier_pts = current_source_pts_arr.select(Axis(0), &sampled_indices)
+                                                            .select(Axis(0), &inlier_indices);
+        let current_error = calculate_mean_error(
+            &transformed_inlier_pts, 
+            &inlier_target_pts
+        );
         
-        println!("Iteration {}: mean error (from {} samples) = {}", i + 1, SAMPLE_SIZE, current_error);
+        println!("Iteration {}: mean error (from {} inliers, {:.0}% kept) = {}", 
+            i + 1, 
+            inlier_indices.len(), 
+            TRIM_PERCENTAGE * 100.0,
+            current_error
+        );
 
         if current_error < tolerance {
             println!("Converged at iteration {}", i + 1);
@@ -149,10 +199,11 @@ fn find_closest_pairs_kdtree(
     source_pts: &Array2<f64>,      // サンプリングされた source 点群
     target_pts: &Array2<f64>,      // target 全体 (インデックスから点を引くため)
     kdtree: &KdTree<f64, usize, Vec<f64>> // 事前に構築した tree
-) -> (Array2<f64>, Vec<usize>) {
+) -> (Array2<f64>, Vec<f64>) {
     
     let n = source_pts.nrows();
     let mut closest_indices = Vec::with_capacity(n);
+    let mut distance_sq = Vec::with_capacity(n);
 
     // source の各点（サンプリングされた点）についてループ
     for i in 0..n { // <-- O(N_sample)
@@ -168,15 +219,16 @@ fn find_closest_pairs_kdtree(
         ).unwrap();
 
         // kdtree.nearest は [(距離, &インデックス)] のリストを返す
-        let (_dist, &target_index) = neighbors[0];
+        let (dist_sq, &target_index) = neighbors[0];
         
         closest_indices.push(target_index);
+        distance_sq.push(dist_sq);
     }
     
     // 見つかったインデックスのリストを使って、
     // target_pts から対応する点を一括で抽出する
     let matched_target_pts = target_pts.select(Axis(0), &closest_indices);
-    (matched_target_pts, closest_indices)
+    (matched_target_pts, distance_sq)
 }
 
 fn find_closest_pairs(

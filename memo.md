@@ -121,3 +121,46 @@ Final aligned source points:
 Saved aligned points to data/output/icp_aligned_result.pcd
 ```
 ![image](./log/icp-result-kdtree.jpeg)
+
+```bash
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running `target/release/icp-practice`
+Loaded 8648 points from data/input/clipped_Laser_map_5_voxel-01.pcd
+Loaded 8648 points from data/input/clipped_rotated_Laser_map_5_voxel-01.pcd
+Building k-d tree for target points...
+k-d tree built with 8648 points.
+Iteration 1: mean error (from 900 inliers, 90% kept) = 0.9458750314254616
+Iteration 2: mean error (from 900 inliers, 90% kept) = 0.6584152639788842
+Iteration 3: mean error (from 900 inliers, 90% kept) = 0.4634720807325152
+Iteration 4: mean error (from 900 inliers, 90% kept) = 0.3374667019383421
+Iteration 5: mean error (from 900 inliers, 90% kept) = 0.2939757678382157
+Iteration 6: mean error (from 900 inliers, 90% kept) = 0.26204339912311175
+Iteration 7: mean error (from 900 inliers, 90% kept) = 0.23390465278708986
+Iteration 8: mean error (from 900 inliers, 90% kept) = 0.21064352898216868
+Iteration 9: mean error (from 900 inliers, 90% kept) = 0.19842286573693826
+Iteration 10: mean error (from 900 inliers, 90% kept) = 0.1633831389161761
+Iteration 11: mean error (from 900 inliers, 90% kept) = 0.1588250992095359
+Iteration 12: mean error (from 900 inliers, 90% kept) = 0.1336266136929849
+Iteration 13: mean error (from 900 inliers, 90% kept) = 0.11227691131783925
+Iteration 14: mean error (from 900 inliers, 90% kept) = 0.10114049339247433
+Iteration 15: mean error (from 900 inliers, 90% kept) = 0.08887424197198146
+Iteration 16: mean error (from 900 inliers, 90% kept) = 0.07511227285962939
+Iteration 17: mean error (from 900 inliers, 90% kept) = 0.06223458554024329
+Iteration 18: mean error (from 900 inliers, 90% kept) = 0.05459354573724842
+Iteration 19: mean error (from 900 inliers, 90% kept) = 0.048081930463290554
+Iteration 20: mean error (from 900 inliers, 90% kept) = 0.02624433296908948
+ICP completed in 22.88ms
+Final aligned source points:
+[[-1.3796347432860474, -2.7623484278390014, 2.8973596763409257],
+ [2.8083630672948035, -0.1748409204543038, 3.109648967754144],
+ [-0.8264630018136556, -2.821509560719727, 3.257650066045735],
+ [2.8421275029770277, 0.6093146692066309, 3.118557392862286],
+ [-1.350645276474148, -2.1888209742409437, 2.771928696520685],
+ ...,
+ [0.20440062654693802, -3.665030547627672, 2.2928212745788885],
+ [0.7688925604063971, -3.6974114390027637, 2.2211243319472698],
+ [1.3765791736440232, -6.145789056744237, 2.5365969982668486],
+ [2.5193145452770196, 3.6266080996646735, 3.0646663109972954],
+ [2.1344629038758223, -2.9741873970568427, 2.1142531312686836]], shape=[8648, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2
+Saved aligned points to data/output/icp_aligned_result.pcd
+```
