@@ -34,9 +34,9 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "approx"
-version = "0.5.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+checksum = "3f2a05fd1bd10b2527e20a2cd32d8873d115b8b39fe219ee25f42a8aca6ba278"
 dependencies = [
  "num-traits",
 ]
@@ -494,8 +494,10 @@ dependencies = [
  "anyhow",
  "ndarray",
  "ndarray-linalg",
+ "ndarray-rand",
  "pcd-rs",
  "plotters",
+ "rand",
 ]
 
 [[package]]
@@ -514,9 +516,9 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
 dependencies = [
  "either",
 ]
@@ -556,25 +558,25 @@ dependencies = [
 
 [[package]]
 name = "lapack-sys"
-version = "0.15.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "314b879030845b68571809a6978e52d3b67ac5fba07e77b1b317b484092e2fb5"
+checksum = "447f56c85fb410a7a3d36701b2153c1018b1d2b908c5fbaf01c1b04fac33bcbe"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "lax"
-version = "0.18.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bda593cb87a3b1c06625e73710812005caf1523e45b0b898adcd7716602f8ba2"
+checksum = "1f96a229d9557112e574164f8024ce703625ad9f88a90964c1780809358e53da"
 dependencies = [
  "cauchy",
  "katexit",
  "lapack-sys",
  "num-traits",
  "openblas-src",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -598,6 +600,12 @@ dependencies = [
  "cfg-if",
  "windows-link",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "libredox"
@@ -667,9 +675,9 @@ dependencies = [
 
 [[package]]
 name = "ndarray"
-version = "0.17.1"
+version = "0.15.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c7c9125e8f6f10c9da3aad044cc918cf8784fa34de857b1aa68038eb05a50a9"
+checksum = "adb12d4e967ec485a5f71c6311fe28158e9d6f4bc4a447b474184d0f91a8fa32"
 dependencies = [
  "approx",
  "cblas-sys",
@@ -678,16 +686,14 @@ dependencies = [
  "num-complex",
  "num-integer",
  "num-traits",
- "portable-atomic",
- "portable-atomic-util",
  "rawpointer",
 ]
 
 [[package]]
 name = "ndarray-linalg"
-version = "0.18.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "264d4af20161410ca6e57eb54f2cbe734de57fb9764860c21b845bb31ec92b54"
+checksum = "0b0e8dda0c941b64a85c5deb2b3e0144aca87aced64678adfc23eacea6d2cc42"
 dependencies = [
  "cauchy",
  "katexit",
@@ -696,7 +702,18 @@ dependencies = [
  "num-complex",
  "num-traits",
  "rand",
- "thiserror 2.0.17",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ndarray-rand"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65608f937acc725f5b164dcf40f4f0bc5d67dc268ab8a649d3002606718c4588"
+dependencies = [
+ "ndarray",
+ "rand",
+ "rand_distr",
 ]
 
 [[package]]
@@ -726,6 +743,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -831,12 +849,12 @@ dependencies = [
 
 [[package]]
 name = "pcd-rs"
-version = "0.12.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c4d5b0e9ec249a51682e697d95293d2b9d766b600aa56f54e559b73b7523182"
+checksum = "d44d229fc0b4cc1c9aeb57e791d187059697f5004182cebabfd530e28c4267fb"
 dependencies = [
+ "anyhow",
  "byteorder",
- "itertools",
  "num-traits",
  "pcd-rs-derive",
  "regex",
@@ -845,9 +863,9 @@ dependencies = [
 
 [[package]]
 name = "pcd-rs-derive"
-version = "0.12.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32f5041014e2db20e2147f7185bbd517afdb7f37f2a74db02dd3ab92a31d47db"
+checksum = "3bed18f4356a941fd36e9fe71436458be1f34b2bb3b61d394b4ec33bc5588547"
 dependencies = [
  "itertools",
  "once_cell",
@@ -939,21 +957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "portable-atomic"
-version = "1.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
-
-[[package]]
-name = "portable-atomic-util"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8a2f0d8d040d7848a709caf78912debcc3f33ee4b3cac47d73d1e1069e83507"
-dependencies = [
- "portable-atomic",
-]
-
-[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1014,6 +1017,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.16",
+]
+
+[[package]]
+name = "rand_distr"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
+dependencies = [
+ "num-traits",
+ "rand",
 ]
 
 [[package]]

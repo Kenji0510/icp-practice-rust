@@ -1,15 +1,17 @@
 use anyhow::{Result, Context};
 use icp_practice::operate_pcd::{PointXYZ, Points, load_pcd_xyz, save_pcd};
+use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 use plotters::prelude::*;
 use ndarray::prelude::*;
 use ndarray_linalg::{Determinant, SVD};
 
-const WIDTH: f64 = 10.0;
-const HEIGHT: f64 = 5.0;
-const ROTATION_ANGLE_DEG: f64 = 25.0;
-const TRANSLATION_X: f64 = 5.0;
-const TRANSLATION_Y: f64 = 3.0;
+// const WIDTH: f64 = 10.0;
+// const HEIGHT: f64 = 5.0;
+// const ROTATION_ANGLE_DEG: f64 = 25.0;
+// const TRANSLATION_X: f64 = 5.0;
+// const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
+const SAMPLE_SIZE: usize = 1000;
 
 fn main() -> Result<()> {
     let target_pcd_file_path = "data/input/clipped_Laser_map_5_voxel-01.pcd";
@@ -36,41 +38,39 @@ fn main() -> Result<()> {
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
-    // let target_pts = array![
-    //     [0., 0.],
-    //     [10., 0.],
-    //     [10., 5.],
-    //     [0., 5.]
-    // ];
-    // println!("Target points: {:?}", target_pts);
-    
-    // let angle_rad = ROTATION_ANGLE_DEG.to_radians();
-    // let R = array![
-    //     [angle_rad.cos(), -angle_rad.sin()],
-    //     [angle_rad.sin(), angle_rad.cos()]
-    // ];
-    // let t = array![TRANSLATION_X, TRANSLATION_Y];
-    // let source_pts = target_pts.dot(&R.t()) + &t;
-    // println!("Source points: {:?}", source_pts);
-
-    // plot_points(&source_pts, &target_pts, &source_pts, "icp_initial.png", "Initial State").unwrap();
-
     let max_iterations = 20;
     let tolerance = 1e-5;
 
     let mut current_source_pts_arr = source_pts_arr.clone();
+    let mut rng = thread_rng();
+    let n_points_source = current_source_pts_arr.nrows();
+    let source_indices: Vec<usize> = (0..n_points_source).collect();
 
     let start = std::time::Instant::now();
     for i in 0..max_iterations {
-        // Find closest points
-        let (matched_target_pts, _) = find_closest_pairs(&current_source_pts_arr, &target_pts_arr);
+        let (sampled_source_pts, sampled_indices) = 
+            if n_points_source <= SAMPLE_SIZE {
+                (current_source_pts_arr.clone(), source_indices.clone())
+            } else {
+                let indices = source_indices.as_slice()
+                    .choose_multiple(&mut rng, SAMPLE_SIZE)
+                    .cloned()
+                    .collect::<Vec<usize>>();
 
-        let (R, t) = calculate_transformation(&current_source_pts_arr, &matched_target_pts);
+                (current_source_pts_arr.select(Axis(0), &indices), indices)
+            };
+
+        // Find closest points
+        let (matched_target_pts, _) = find_closest_pairs(&sampled_source_pts, &target_pts_arr);
+
+        let (R, t) = calculate_transformation(&sampled_source_pts, &matched_target_pts);
 
         current_source_pts_arr = current_source_pts_arr.dot(&R.t()) + &t;
 
-        let current_error = calculate_mean_error(&current_source_pts_arr, &matched_target_pts);
-        println!("Iteration {}: mean error = {}", i + 1, current_error);
+        let transformed_sampled_pts = current_source_pts_arr.select(Axis(0), &sampled_indices);
+        let current_error = calculate_mean_error(&transformed_sampled_pts, &matched_target_pts);
+        
+        println!("Iteration {}: mean error (from {} samples) = {}", i + 1, SAMPLE_SIZE, current_error);
 
         if current_error < tolerance {
             println!("Converged at iteration {}", i + 1);

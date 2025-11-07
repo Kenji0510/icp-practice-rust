@@ -35,3 +35,49 @@ Final aligned source points:
 Saved aligned points to data/output/icp_aligned_result.pcd
 ```
 ![image](./log/icp-result.jpeg)
+
+```bash
+sudo apt update
+sudo apt install -y build-essential gfortran pkg-config \
+  libopenblas-dev liblapacke-dev \
+  libfreetype6-dev libfontconfig1-dev
+
+```
+
+```bash
+    Finished `release` profile [optimized] target(s) in 13.34s
+     Running `target/release/icp-practice`
+Loaded 8648 points from data/input/clipped_Laser_map_5_voxel-01.pcd
+Loaded 8648 points from data/input/clipped_rotated_Laser_map_5_voxel-01.pcd
+Iteration 1: mean error (from 1000 samples) = 1.0464834623582155
+Iteration 2: mean error (from 1000 samples) = 0.609215262737433
+Iteration 3: mean error (from 1000 samples) = 0.3816289746406624
+Iteration 4: mean error (from 1000 samples) = 0.27243088716564345
+Iteration 5: mean error (from 1000 samples) = 0.2152007702925228
+Iteration 6: mean error (from 1000 samples) = 0.16099589469484907
+Iteration 7: mean error (from 1000 samples) = 0.13743164150654025
+Iteration 8: mean error (from 1000 samples) = 0.10981857895711765
+Iteration 9: mean error (from 1000 samples) = 0.09191812939351476
+Iteration 10: mean error (from 1000 samples) = 0.07818369801694519
+Iteration 11: mean error (from 1000 samples) = 0.06053797777929556
+Iteration 12: mean error (from 1000 samples) = 0.05150612374520945
+Iteration 13: mean error (from 1000 samples) = 0.029858870901635654
+Iteration 14: mean error (from 1000 samples) = 0.002605250767303638
+Iteration 15: mean error (from 1000 samples) = 0.000001373912088804934
+Converged at iteration 15
+ICP completed in 4.95s
+Final aligned source points:
+[[-1.3830013419269138, -2.7630947251344193, 2.8890319682524694],
+ [2.7929324213327864, -0.15770322971726616, 3.119466049773871],
+ [-0.8313907561885355, -2.8195444956943514, 3.252139893291388],
+ [2.8233439248541448, 0.6265968049662518, 3.1277111695631215],
+ [-1.355805488837968, -2.189580642401637, 2.763138988315861],
+ ...,
+ [0.20782629110551387, -3.6597066114002685, 2.2933606588373374],
+ [0.7728007315313211, -3.689777620135212, 2.224514938559541],
+ [1.3892270089664116, -6.135237621595166, 2.5456115095586807],
+ [2.4880793617275776, 3.642442292580384, 3.069010510300134],
+ [2.1358247914951427, -2.960904091435943, 2.1236902269680455]], shape=[8648, 3], strides=[3, 1], layout=Cc (0x5), const ndim=2
+Saved aligned points to data/output/icp_aligned_result.pcd
+```
+![image](./log/icp-result-random-sampling.jpeg)
