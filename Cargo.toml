@@ -1,0 +1,9 @@
+[package]
+name = "icp-practice"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ndarray = "0.17.1"
+ndarray-linalg = { version = "0.18", features = ["openblas-static"] }
+plotters = "0.3.7"
