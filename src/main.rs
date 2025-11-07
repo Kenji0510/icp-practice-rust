@@ -60,6 +60,7 @@ fn main() -> Result<()> {
 
     let mut current_source_pts_arr = source_pts_arr.clone();
 
+    let start = std::time::Instant::now();
     for i in 0..max_iterations {
         // Find closest points
         let (matched_target_pts, _) = find_closest_pairs(&current_source_pts_arr, &target_pts_arr);
@@ -76,6 +77,8 @@ fn main() -> Result<()> {
             break;
         }
     }
+    let elapsed = start.elapsed();
+    println!("ICP completed in {:.2?}", elapsed);
 
     println!("Final aligned source points:\n{:?}", current_source_pts_arr);
 
