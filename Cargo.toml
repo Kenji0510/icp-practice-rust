@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
 ndarray = "0.17.1"
 ndarray-linalg = { version = "0.18", features = ["openblas-static"] }
+pcd-rs = {version = "0.12.0", features = ["derive"] }
 plotters = "0.3.7"

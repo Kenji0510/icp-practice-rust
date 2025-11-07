@@ -1,3 +1,5 @@
+use anyhow::{Result, Context};
+use icp_practice::operate_pcd::{PointXYZ, Points, load_pcd_xyz, save_pcd};
 use plotters::prelude::*;
 use ndarray::prelude::*;
 use ndarray_linalg::{Determinant, SVD};
@@ -9,40 +11,64 @@ const TRANSLATION_X: f64 = 5.0;
 const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
 
-fn main() {
-    let target_pts = array![
-        [0., 0.],
-        [10., 0.],
-        [10., 5.],
-        [0., 5.]
-    ];
-    println!("Target points: {:?}", target_pts);
-    
-    let angle_rad = ROTATION_ANGLE_DEG.to_radians();
-    let R = array![
-        [angle_rad.cos(), -angle_rad.sin()],
-        [angle_rad.sin(), angle_rad.cos()]
-    ];
-    let t = array![TRANSLATION_X, TRANSLATION_Y];
-    let source_pts = target_pts.dot(&R.t()) + &t;
-    println!("Source points: {:?}", source_pts);
+fn main() -> Result<()> {
+    let target_pcd_file_path = "data/input/clipped_Laser_map_5_voxel-01.pcd";
+    let source_pcd_file_path = "data/input/clipped_rotated_Laser_map_5_voxel-01.pcd";
+    let target_d = load_pcd_xyz(target_pcd_file_path)
+        .context("Failed to load PCD file")?;
+    let source_d = load_pcd_xyz(source_pcd_file_path)
+        .context("Failed to load PCD file")?;
 
-    plot_points(&source_pts, &target_pts, &source_pts, "icp_initial.png", "Initial State").unwrap();
+    let target_pts = Points::new(target_d);
+    println!("Loaded {} points from {}", target_pts.points.len(), target_pcd_file_path);
+
+    let mut source_pts = Points::new(source_d);
+    println!("Loaded {} points from {}", source_pts.points.len(), source_pcd_file_path);
+
+    let transform_matrix = array![
+        [0.959326, 0.282294, -0.002065, 2.249126],
+        [-0.282291, 0.959327, 0.001695, 0.171887],
+        [0.002459, -0.001043, 0.999996, -0.001295],
+        [0.000000, 0.000000, 0.000000, 1.000000],
+    ];
+    source_pts.apply_transform(&transform_matrix);
+
+    let target_pts_arr = points_to_array2(&target_pts);
+    let source_pts_arr = points_to_array2(&source_pts);
+
+    // let target_pts = array![
+    //     [0., 0.],
+    //     [10., 0.],
+    //     [10., 5.],
+    //     [0., 5.]
+    // ];
+    // println!("Target points: {:?}", target_pts);
+    
+    // let angle_rad = ROTATION_ANGLE_DEG.to_radians();
+    // let R = array![
+    //     [angle_rad.cos(), -angle_rad.sin()],
+    //     [angle_rad.sin(), angle_rad.cos()]
+    // ];
+    // let t = array![TRANSLATION_X, TRANSLATION_Y];
+    // let source_pts = target_pts.dot(&R.t()) + &t;
+    // println!("Source points: {:?}", source_pts);
+
+    // plot_points(&source_pts, &target_pts, &source_pts, "icp_initial.png", "Initial State").unwrap();
 
     let max_iterations = 20;
     let tolerance = 1e-5;
 
-    let mut current_source_pts = source_pts.clone();
+    let mut current_source_pts_arr = source_pts_arr.clone();
 
     for i in 0..max_iterations {
         // Find closest points
-        let (matched_target_pts, _) = find_closest_pairs(&current_source_pts, &target_pts);
+        let (matched_target_pts, _) = find_closest_pairs(&current_source_pts_arr, &target_pts_arr);
 
-        let (R, t) = calculate_transformation(&current_source_pts, &matched_target_pts);
+        let (R, t) = calculate_transformation(&current_source_pts_arr, &matched_target_pts);
 
-        current_source_pts = current_source_pts.dot(&R.t()) + &t;
+        current_source_pts_arr = current_source_pts_arr.dot(&R.t()) + &t;
 
-        let current_error = calculate_mean_error(&current_source_pts, &matched_target_pts);
+        let current_error = calculate_mean_error(&current_source_pts_arr, &matched_target_pts);
         println!("Iteration {}: mean error = {}", i + 1, current_error);
 
         if current_error < tolerance {
@@ -51,9 +77,58 @@ fn main() {
         }
     }
 
-    println!("Final aligned source points:\n{:?}", current_source_pts);
+    println!("Final aligned source points:\n{:?}", current_source_pts_arr);
 
-    plot_points(&source_pts, &target_pts, &current_source_pts, "icp_final.png", "Final State").unwrap();
+    // plot_points(&source_pts, &target_pts, &current_source_pts, "icp_final.png", "Final State").unwrap();
+
+    let aligned_source_pts = array2_to_points(&current_source_pts_arr);
+
+    let colored_target_pts = target_pts.transform_colored_points((0, 0, 255)); // 青
+    let colored_source_pts = source_pts.transform_colored_points((255, 0, 0)); // 赤
+    let colored_aligned_source_pts = aligned_source_pts.transform_colored_points((0, 255, 0)); // 緑
+
+    let mut all_points = colored_target_pts.clone();
+    all_points.extend(colored_aligned_source_pts.clone());
+    all_points.extend(colored_source_pts.clone());
+
+    // Save each point clouds
+    let save_path = "data/output/icp_aligned_result.pcd";
+    match save_pcd(&all_points, save_path) {
+        Ok(_) => println!("Saved aligned points to {}", save_path),
+        Err(e) => eprintln!("Failed to save PCD file: {}", e),
+    }
+
+    Ok(())
+}
+
+fn array2_to_points(
+    arr: &Array2<f64>
+) -> Points {
+    let mut pts = Vec::with_capacity(arr.len());
+    for i in 0..arr.nrows() {
+        pts.push(PointXYZ {
+            x: arr[[i, 0]] as f32,
+            y: arr[[i, 1]] as f32,
+            z: arr[[i, 2]] as f32,
+        });
+    }
+
+    Points::new(pts)
+}
+
+fn points_to_array2(
+    points: &Points
+) -> Array2<f64> {
+    let n = points.points.len();
+    let mut arr = Array2::<f64>::zeros((n, 3));
+
+    for (i, p) in points.points.iter().enumerate() {
+        arr[[i, 0]] = p.x as f64;
+        arr[[i, 1]] = p.y as f64;
+        arr[[i, 2]] = p.z as f64;
+    }
+
+    arr
 }
 
 fn find_closest_pairs(
