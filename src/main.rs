@@ -1,5 +1,6 @@
 use anyhow::{Result, Context};
 use icp_practice::operate_pcd::{PointXYZ, Points, load_pcd_xyz, save_pcd};
+use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 use plotters::prelude::*;
 use ndarray::prelude::*;
@@ -46,6 +47,16 @@ fn main() -> Result<()> {
     let n_points_source = current_source_pts_arr.nrows();
     let source_indices: Vec<usize> = (0..n_points_source).collect();
 
+    println!("Building k-d tree for target points...");
+    let n_dims_target = target_pts_arr.ncols();
+    let mut kdtree: KdTree<f64, usize, Vec<f64>> = KdTree::new(n_dims_target);
+
+    for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
+        let point_slice = point_row.as_slice().unwrap();
+        kdtree.add(point_slice.to_vec(), i).unwrap();
+    }
+    println!("k-d tree built with {} points.", target_pts_arr.nrows());
+
     let start = std::time::Instant::now();
     for i in 0..max_iterations {
         let (sampled_source_pts, sampled_indices) = 
@@ -61,7 +72,7 @@ fn main() -> Result<()> {
             };
 
         // Find closest points
-        let (matched_target_pts, _) = find_closest_pairs(&sampled_source_pts, &target_pts_arr);
+        let (matched_target_pts, _) = find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree);
 
         let (R, t) = calculate_transformation(&sampled_source_pts, &matched_target_pts);
 
@@ -132,6 +143,40 @@ fn points_to_array2(
     }
 
     arr
+}
+
+fn find_closest_pairs_kdtree(
+    source_pts: &Array2<f64>,      // サンプリングされた source 点群
+    target_pts: &Array2<f64>,      // target 全体 (インデックスから点を引くため)
+    kdtree: &KdTree<f64, usize, Vec<f64>> // 事前に構築した tree
+) -> (Array2<f64>, Vec<usize>) {
+    
+    let n = source_pts.nrows();
+    let mut closest_indices = Vec::with_capacity(n);
+
+    // source の各点（サンプリングされた点）についてループ
+    for i in 0..n { // <-- O(N_sample)
+        let source_row = source_pts.row(i);
+        let query_point = source_row.as_slice().unwrap();
+
+        // k-d tree を使って、最も近い点「1個」を探索 (k=1)
+        // これが O(M) から O(log M) への高速化！
+        let neighbors = kdtree.nearest(
+            query_point,
+            1, // k=1: 最も近い点 1 個だけを探す
+            &squared_euclidean // 距離計算の方法
+        ).unwrap();
+
+        // kdtree.nearest は [(距離, &インデックス)] のリストを返す
+        let (_dist, &target_index) = neighbors[0];
+        
+        closest_indices.push(target_index);
+    }
+    
+    // 見つかったインデックスのリストを使って、
+    // target_pts から対応する点を一括で抽出する
+    let matched_target_pts = target_pts.select(Axis(0), &closest_indices);
+    (matched_target_pts, closest_indices)
 }
 
 fn find_closest_pairs(

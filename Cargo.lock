@@ -492,6 +492,7 @@ name = "icp-practice"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "kdtree",
  "ndarray",
  "ndarray-linalg",
  "ndarray-rand",
@@ -554,6 +555,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.109",
+]
+
+[[package]]
+name = "kdtree"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0a0e9f770b65bac9aad00f97a67ab5c5319effed07f6da385da3c2115e47ba"
+dependencies = [
+ "num-traits",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
