@@ -13,12 +13,12 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 1000;
+const SAMPLE_SIZE: usize = 300;
 const TRIM_PERCENTAGE: f64 = 0.9;
 
 fn main() -> Result<()> {
-    let target_pcd_file_path = "data/input/clipped_Laser_map_5_voxel-01.pcd";
-    let source_pcd_file_path = "data/input/clipped_rotated_Laser_map_5_voxel-01.pcd";
+    let target_pcd_file_path = "data/input/removed-ceiling-output-025.pcd";
+    let source_pcd_file_path = "data/input/removed-ceiling-cloud_registered_body_0_025.pcd";
     let target_d = load_pcd_xyz(target_pcd_file_path)
         .context("Failed to load PCD file")?;
     let source_d = load_pcd_xyz(source_pcd_file_path)
@@ -38,19 +38,19 @@ fn main() -> Result<()> {
     //     [0.000000, 0.000000, 0.000000, 1.000000],
     // ];
     // OK
-    // let transform_matrix = array![
-    //     [0.962047, 0.259369, -0.084812, 2.365178],
-    //     [-0.272116, 0.888537, -0.369399, 0.685336],
-    //     [-0.020452, 0.378457, 0.925393, 0.015746],
-    //     [0.000000, 0.000000, 0.000000, 1.000000],
-    // ];
-    // OK
     let transform_matrix = array![
-        [0.790851, 0.580114, 0.194992, 9.089207],
-        [-0.467640, 0.778335, -0.418935, -0.078562],
-        [-0.394800, 0.240130, 0.886832, -3.941626],
+        [0.962047, 0.259369, -0.084812, 2.365178],
+        [-0.272116, 0.888537, -0.369399, 0.685336],
+        [-0.020452, 0.378457, 0.925393, 0.015746],
         [0.000000, 0.000000, 0.000000, 1.000000],
     ];
+    // OK
+    // let transform_matrix = array![
+    //     [0.790851, 0.580114, 0.194992, 9.089207],
+    //     [-0.467640, 0.778335, -0.418935, -0.078562],
+    //     [-0.394800, 0.240130, 0.886832, -3.941626],
+    //     [0.000000, 0.000000, 0.000000, 1.000000],
+    // ];
     // NG (Iteration 20, 100)
     // let transform_matrix = array![
     //     [-0.613723, 0.085265, 0.784904, 14.261620],
@@ -63,8 +63,8 @@ fn main() -> Result<()> {
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
-    let max_iterations = 100;
-    let tolerance = 1e-2;
+    let max_iterations = 20;
+    let tolerance = 1e-1;
 
     let mut current_source_pts_arr = source_pts_arr.clone();
     let mut rng = thread_rng();
@@ -157,7 +157,7 @@ fn main() -> Result<()> {
     all_points.extend(colored_source_pts.clone());
 
     // Save each point clouds
-    let save_path = "data/output/icp_aligned_result.pcd";
+    let save_path = "data/output/icp_aligned_result_v-025.pcd";
     match save_pcd(&all_points, save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
