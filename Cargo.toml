@@ -15,3 +15,4 @@ rand = "0.8"
 ndarray-rand = "0.14"
 
 kdtree = "0.7"
+rayon = "1.11.0"

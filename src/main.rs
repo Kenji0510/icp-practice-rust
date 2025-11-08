@@ -5,6 +5,7 @@ use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 use plotters::prelude::*;
 use ndarray::prelude::*;
 use ndarray_linalg::{Determinant, SVD};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 // const WIDTH: f64 = 10.0;
 // const HEIGHT: f64 = 5.0;
@@ -44,26 +45,26 @@ fn main() -> Result<()> {
     //     [0.000000, 0.000000, 0.000000, 1.000000],
     // ];
     // OK
-    // let transform_matrix = array![
-    //     [0.790851, 0.580114, 0.194992, 9.089207],
-    //     [-0.467640, 0.778335, -0.418935, -0.078562],
-    //     [-0.394800, 0.240130, 0.886832, -3.941626],
-    //     [0.000000, 0.000000, 0.000000, 1.000000],
-    // ];
-    // NG (Iteration 20, 100)
     let transform_matrix = array![
-        [-0.613723, 0.085265, 0.784904, 14.261620],
-        [-0.788805, -0.023871, -0.614180, -1.739003],
-        [-0.033632, -0.996072, 0.081908, -6.542201],
+        [0.790851, 0.580114, 0.194992, 9.089207],
+        [-0.467640, 0.778335, -0.418935, -0.078562],
+        [-0.394800, 0.240130, 0.886832, -3.941626],
         [0.000000, 0.000000, 0.000000, 1.000000],
     ];
+    // NG (Iteration 20, 100)
+    // let transform_matrix = array![
+    //     [-0.613723, 0.085265, 0.784904, 14.261620],
+    //     [-0.788805, -0.023871, -0.614180, -1.739003],
+    //     [-0.033632, -0.996072, 0.081908, -6.542201],
+    //     [0.000000, 0.000000, 0.000000, 1.000000],
+    // ];
     source_pts.apply_transform(&transform_matrix);
 
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
     let max_iterations = 100;
-    let tolerance = 1e-3;
+    let tolerance = 1e-2;
 
     let mut current_source_pts_arr = source_pts_arr.clone();
     let mut rng = thread_rng();
@@ -202,28 +203,46 @@ fn find_closest_pairs_kdtree(
 ) -> (Array2<f64>, Vec<f64>) {
     
     let n = source_pts.nrows();
-    let mut closest_indices = Vec::with_capacity(n);
-    let mut distance_sq = Vec::with_capacity(n);
+    // let mut closest_indices = Vec::with_capacity(n);
+    // let mut distance_sq = Vec::with_capacity(n);
 
     // source の各点（サンプリングされた点）についてループ
-    for i in 0..n { // <-- O(N_sample)
-        let source_row = source_pts.row(i);
-        let query_point = source_row.as_slice().unwrap();
+    // for i in 0..n { // <-- O(N_sample)
+    //     let source_row = source_pts.row(i);
+    //     let query_point = source_row.as_slice().unwrap();
 
-        // k-d tree を使って、最も近い点「1個」を探索 (k=1)
-        // これが O(M) から O(log M) への高速化！
-        let neighbors = kdtree.nearest(
-            query_point,
-            1, // k=1: 最も近い点 1 個だけを探す
-            &squared_euclidean // 距離計算の方法
-        ).unwrap();
+    //     // k-d tree を使って、最も近い点「1個」を探索 (k=1)
+    //     // これが O(M) から O(log M) への高速化！
+    //     let neighbors = kdtree.nearest(
+    //         query_point,
+    //         1, // k=1: 最も近い点 1 個だけを探す
+    //         &squared_euclidean // 距離計算の方法
+    //     ).unwrap();
 
-        // kdtree.nearest は [(距離, &インデックス)] のリストを返す
-        let (dist_sq, &target_index) = neighbors[0];
+    //     // kdtree.nearest は [(距離, &インデックス)] のリストを返す
+    //     let (dist_sq, &target_index) = neighbors[0];
         
-        closest_indices.push(target_index);
-        distance_sq.push(dist_sq);
-    }
+    //     closest_indices.push(target_index);
+    //     distance_sq.push(dist_sq);
+    // }
+
+    let results: Vec<(usize, f64)> = (0..n).into_par_iter()
+        .map(|i| {
+            let source_row = source_pts.row(i);
+            let query_point = source_row.as_slice().unwrap();
+
+            let neighbors = kdtree.nearest(
+                query_point, 
+                1, 
+                &squared_euclidean
+            ).unwrap();
+
+            let (dist_sq, &target_index) = neighbors[0];
+            (target_index, dist_sq)
+        })
+        .collect();
+
+    let (closest_indices, distance_sq): (Vec<usize>, Vec<f64>) = results.into_iter().unzip();
     
     // 見つかったインデックスのリストを使って、
     // target_pts から対応する点を一括で抽出する
