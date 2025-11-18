@@ -8,7 +8,7 @@ anyhow = "1.0"
 pcd-rs = { version = "0.11", features = ["derive"] }
 plotters = "0.3"
 
-ndarray = { version = "0.15", features = ["blas"] }
+ndarray = { version = "0.15", features = ["blas", "rayon"] }
 ndarray-linalg = { version = "0.16", features = ["openblas-system"] }
 
 rand = "0.8"

@@ -23,9 +23,40 @@ pub struct PointXYZRGB {
     pub rgb: f32,
 }
 
+#[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
+pub struct PointXYZNormal {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+}
+
 pub fn rgb_to_float(r: u8, g: u8, b: u8) -> f32 {
     let rgb_int: u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     f32::from_bits(rgb_int)
+}
+
+pub fn save_pcd_with_normals(
+    points: &[PointXYZNormal],
+    file_path: &str,
+) -> Result<()> {
+    let mut writer = pcd_rs::WriterInit {
+        width: 1,
+        height: points.len() as u64,
+        viewpoint: Default::default(),
+        data_kind: pcd_rs::DataKind::Ascii,
+        schema: None,
+    }
+    .create(file_path)?;
+    
+    for point in points {
+        writer.push(point)?;
+    }
+    
+    writer.finish()?;
+    Ok(())
 }
 
 pub fn save_pcd(
