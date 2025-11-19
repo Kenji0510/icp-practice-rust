@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 pub fn load_pcd_files(
     dir_path: &str,
 ) -> Result<Vec<PathBuf>> {
-    let re = regex::Regex::new(r"voxelized-025_frame_(\d+)\.pcd$")
+    let re = regex::Regex::new(r"voxelized-010_frame_(\d+)\.pcd$")
         .context("Invalid regex pattern")?;
 
     let entries = fs::read_dir(dir_path)

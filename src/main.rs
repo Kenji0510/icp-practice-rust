@@ -4,7 +4,7 @@ use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
-use ndarray_linalg::{SVD, Solve};
+use ndarray_linalg::{Inverse, SVD, Solve};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 // use rayon::prelude::*;
 
@@ -14,15 +14,15 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 300;
-const TRIM_PERCENTAGE: f64 = 0.9;
-const K_NEIGHBORS: usize = 15;
+const SAMPLE_SIZE: usize = 600;
+const TRIM_PERCENTAGE: f64 = 0.75;
+const K_NEIGHBORS: usize = 30;
 const MAX_ITERATIONS: usize = 20;
 const TOLERANCE: f64 = 0.015;
-const VOXEL_SIZE: f64 = 0.25;
+const VOXEL_SIZE: f64 = 0.1;
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/4201";
+    let target_pcd_dir = "data/input/4201/voxel-01";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -46,7 +46,9 @@ fn main() -> Result<()> {
     let initial_pts = Points::new(initial_pcd);
     let initial_pts_arr = points_to_array2(&initial_pts);
     let mut target_pts_arr = initial_pts_arr.clone();
+
     let mut current_global_pose = Array2::<f64>::eye(4);
+    let mut last_delta_transform = Array2::<f64>::eye(4); // 直近の速度（移動量）を保持
 
     for (i, pcd_path) in pcd_paths.iter().enumerate() {
         println!("PCD File {}: {}", i, pcd_path.display());
@@ -84,7 +86,10 @@ fn main() -> Result<()> {
         let target_normals = calculate_normals(&target_pts_arr, &kdtree, &viewpoint)
             .context("Failed to calculate normals")?;
 
-        let mut total_transform = current_global_pose.clone();
+        let predicted_pose = last_delta_transform.dot(&current_global_pose);
+        // let mut total_transform = current_global_pose.clone();
+        // ICPの探索開始位置を予測位置にセット
+        let mut total_transform = predicted_pose;
 
         // Copy source points for current frame
         let source_points_num = current_pts_arr.nrows();
@@ -182,19 +187,40 @@ fn main() -> Result<()> {
             }
         }
 
+        let new_delta = total_transform.dot(&current_global_pose.inv().unwrap());
+
+        last_delta_transform = new_delta;
         current_global_pose = total_transform.clone();
 
-        let cloned_source_pts = original_source_pts.clone();
-        let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
-        let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
+        // let cloned_source_pts = original_source_pts.clone();
+        // let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
+        // let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
 
-        target_pts_arr = ndarray::concatenate(
-            Axis(0), 
-            &[target_pts_arr.view(), final_aligned_source_pts_arr.view()])
-            .context("Failed to concatenate arrays")?;
+        // target_pts_arr = ndarray::concatenate(
+        //     Axis(0), 
+        //     &[target_pts_arr.view(), final_aligned_source_pts_arr.view()])
+        //     .context("Failed to concatenate arrays")?;
 
-        target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
-        println!("After voxel downsampling: {} points", target_pts_arr.nrows());
+        // target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
+        // println!("After voxel downsampling: {} points", target_pts_arr.nrows());
+
+        if i % 10 == 0 {
+            println!("Updating map at frame {}", i);
+            
+            // ソース点群を現在の推定位置に変換
+            let cloned_source_pts = original_source_pts.clone();
+            let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
+            let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
+
+            // 地図に結合
+            target_pts_arr = ndarray::concatenate(
+                Axis(0), 
+                &[target_pts_arr.view(), final_aligned_source_pts_arr.view()])
+                .context("Failed to concatenate arrays")?;
+
+            // ボクセルダウンサンプリング（地図が肥大化しないように）
+            target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
+        }
 
         // Debug
         if i % 10 == 0 {
