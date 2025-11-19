@@ -20,8 +20,8 @@ const TRIM_PERCENTAGE: f64 = 0.9;
 const K_NEIGHBORS: usize = 15;
 
 fn main() -> Result<()> {
-    let target_pcd_file_path = "data/input/avia/voxelized-025_frame_3.pcd";
-    let source_pcd_file_path = "data/input/avia/voxelized-025_frame_13.pcd";
+    let target_pcd_file_path = "data/input/avia/voxelized-025_frame_400.pcd";
+    let source_pcd_file_path = "data/input/avia/voxelized-025_frame_410.pcd";
     let target_d = load_pcd_xyz(target_pcd_file_path)
         .context("Failed to load PCD file")?;
     let source_d = load_pcd_xyz(source_pcd_file_path)
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
-    let max_iterations = 40;
+    let max_iterations = 20;
     let tolerance = 0.015;  // Prev: 1e-2
 
     let mut current_source_pts_arr = source_pts_arr.clone();
