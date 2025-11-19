@@ -2,11 +2,11 @@ use anyhow::{Result, Context};
 use icp_practice::operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals};
 use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
-use plotters::prelude::*;
+// use plotters::prelude::*;
 use ndarray::prelude::*;
-use ndarray_linalg::{Determinant, SVD, Solve};
+use ndarray_linalg::{SVD, Solve};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use rayon::prelude::*;
+// use rayon::prelude::*;
 
 // const WIDTH: f64 = 10.0;
 // const HEIGHT: f64 = 5.0;
@@ -30,45 +30,8 @@ fn main() -> Result<()> {
     let target_pts = Points::new(target_d);
     println!("Loaded {} points from {}", target_pts.points.len(), target_pcd_file_path);
 
-    let mut source_pts = Points::new(source_d);
+    let source_pts = Points::new(source_d);
     println!("Loaded {} points from {}", source_pts.points.len(), source_pcd_file_path);
-
-    // OK
-    // let transform_matrix = array![
-    //     [0.959326, 0.282294, -0.002065, 2.249126],
-    //     [-0.282291, 0.959327, 0.001695, 0.171887],
-    //     [0.002459, -0.001043, 0.999996, -0.001295],
-    //     [0.000000, 0.000000, 0.000000, 1.000000],
-    // ];
-    // OK
-    // let transform_matrix = array![
-    //     [0.962047, 0.259369, -0.084812, 2.365178],
-    //     [-0.272116, 0.888537, -0.369399, 0.685336],
-    //     [-0.020452, 0.378457, 0.925393, 0.015746],
-    //     [0.000000, 0.000000, 0.000000, 1.000000],
-    // ];
-    // OK
-    // let transform_matrix = array![
-    //     [0.790851, 0.580114, 0.194992, 9.089207],
-    //     [-0.467640, 0.778335, -0.418935, -0.078562],
-    //     [-0.394800, 0.240130, 0.886832, -3.941626],
-    //     [0.000000, 0.000000, 0.000000, 1.000000],
-    // ];
-    // NG (Iteration 20, 100)
-    // let transform_matrix = array![
-    //     [-0.613723, 0.085265, 0.784904, 14.261620],
-    //     [-0.788805, -0.023871, -0.614180, -1.739003],
-    //     [-0.033632, -0.996072, 0.081908, -6.542201],
-    //     [0.000000, 0.000000, 0.000000, 1.000000],
-    // ];
-    // NG
-    // let transform_matrix = array![
-    // [0.279534, -0.499074, 0.820236, -11.477912],
-    // [-0.280491, 0.774577, 0.566883, -16.308172],
-    // [-0.918252, -0.388531, 0.076535, -0.585923],
-    // [0.000000, 0.000000, 0.000000, 1.000000]
-    // ];
-    // source_pts.apply_transform(&transform_matrix);
 
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
@@ -76,10 +39,10 @@ fn main() -> Result<()> {
     let max_iterations = 20;
     let tolerance = 0.015;  // Prev: 1e-2
 
-    let mut current_source_pts_arr = source_pts_arr.clone();
-    let mut rng = thread_rng();
-    let n_points_source = current_source_pts_arr.nrows();
-    let source_indices: Vec<usize> = (0..n_points_source).collect();
+    // let current_source_pts_arr = source_pts_arr.clone();
+    // let rng = thread_rng();
+    // let n_points_source = current_source_pts_arr.nrows();
+    // let source_indices: Vec<usize> = (0..n_points_source).collect();
 
     println!("Building k-d tree for target points...");
     let n_dims_target = target_pts_arr.ncols();
@@ -126,7 +89,7 @@ fn main() -> Result<()> {
         let current_source_pts_arr = current_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
         // (サンプリングは current_source_pts_arr から行う - 変更なし)
-        let (sampled_source_pts, sampled_indices) = 
+        let (sampled_source_pts, _) = 
             if n_points_source <= SAMPLE_SIZE {
                 (current_source_pts_arr.clone(), source_indices.clone())
             } else {
@@ -284,7 +247,7 @@ fn calculate_transformation_pt_to_plane(
     // azip! を使って並列に A と b を構築
     azip!((
         mut a_row in a.axis_iter_mut(Axis(0)),
-        mut b_val in &mut b,
+        b_val in &mut b,
         p_s in inlier_source_pts.axis_iter(Axis(0)), // p'_i (transformed source)
         p_t in inlier_target_pts.axis_iter(Axis(0)), // x_i (target)
         n_t in inlier_target_normals.axis_iter(Axis(0)) // n_i (target normal)
@@ -504,28 +467,6 @@ fn find_closest_pairs_kdtree(
 ) -> (Array2<f64>, Vec<usize>, Vec<f64>) {
     
     let n = source_pts.nrows();
-    // let mut closest_indices = Vec::with_capacity(n);
-    // let mut distance_sq = Vec::with_capacity(n);
-
-    // source の各点（サンプリングされた点）についてループ
-    // for i in 0..n { // <-- O(N_sample)
-    //     let source_row = source_pts.row(i);
-    //     let query_point = source_row.as_slice().unwrap();
-
-    //     // k-d tree を使って、最も近い点「1個」を探索 (k=1)
-    //     // これが O(M) から O(log M) への高速化！
-    //     let neighbors = kdtree.nearest(
-    //         query_point,
-    //         1, // k=1: 最も近い点 1 個だけを探す
-    //         &squared_euclidean // 距離計算の方法
-    //     ).unwrap();
-
-    //     // kdtree.nearest は [(距離, &インデックス)] のリストを返す
-    //     let (dist_sq, &target_index) = neighbors[0];
-        
-    //     closest_indices.push(target_index);
-    //     distance_sq.push(dist_sq);
-    // }
 
     let results: Vec<(usize, f64)> = (0..n).into_par_iter()
         .map(|i| {
@@ -587,102 +528,4 @@ fn find_closest_indices(
         closest_indices.push(min_idx);
     }
     closest_indices
-}
-
-fn calculate_transformation(
-    source_pts: &Array2<f64>,
-    target_pts: &Array2<f64>
-) -> (Array2<f64>, Array1<f64>) {
-    let centroid_source = source_pts.mean_axis(Axis(0)).unwrap();
-    let centroid_target = target_pts.mean_axis(Axis(0)).unwrap();
-
-    let source_prime = source_pts - &centroid_source;
-    let target_prime = target_pts - &centroid_target;
-
-    let W = target_prime.t().dot(&source_prime);
-    
-    // SVD
-    let (u, _s, vh) = W.svd(true, true).unwrap();
-    let u = u.unwrap();
-    let mut vh = vh.unwrap();
-
-    let mut R = u.dot(&vh);
-    if R.det().unwrap() < 0.0 {
-        let n = vh.nrows();
-        for j in 0..vh.ncols() {
-            vh[[n - 1, j]] *= -1.0;
-        }
-        R = u.dot(&vh);
-    }
-
-    let t = &centroid_target - &R.dot(&centroid_source);
-    
-    (R, t)
-}
-
-fn calculate_mean_error(
-    source_pts: &Array2<f64>,
-    target_pts: &Array2<f64>,
-) -> f64 {
-    let diff = source_pts - target_pts;
-    let distances = diff.mapv(|x| x * x)
-        .sum_axis(Axis(1))
-        .mapv(|x| x.sqrt());
-    distances.mean().unwrap()
-}
-
-fn plot_points(
-    original_source: &Array2<f64>,
-    target: &Array2<f64>,
-    current_source: &Array2<f64>,
-    filename: &str,
-    title: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let root = BitMapBackend::new(filename, (800, 600)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption(title, ("sans-serif", 30))
-        .margin(20)
-        .x_label_area_size(30)
-        .y_label_area_size(30)
-        .build_cartesian_2d(-2f64..15f64, -2f64..10f64)?;
-
-    chart.configure_mesh().draw()?;
-
-    // Target points (青)
-    chart.draw_series(
-        target.rows().into_iter().map(|row| {
-            Circle::new((row[0], row[1]), 5, BLUE.filled())
-        })
-    )?
-    .label("Target")
-    .legend(|(x, y)| Circle::new((x, y), 5, BLUE.filled()));
-
-    // Original source points (赤)
-    chart.draw_series(
-        original_source.rows().into_iter().map(|row| {
-            Circle::new((row[0], row[1]), 5, RED.filled())
-        })
-    )?
-    .label("Original Source")
-    .legend(|(x, y)| Circle::new((x, y), 5, RED.filled()));
-
-    // Current source points (緑)
-    chart.draw_series(
-        current_source.rows().into_iter().map(|row| {
-            Circle::new((row[0], row[1]), 5, GREEN.filled())
-        })
-    )?
-    .label("Current Source")
-    .legend(|(x, y)| Circle::new((x, y), 5, GREEN.filled()));
-
-    chart.configure_series_labels()
-        .background_style(&WHITE.mix(0.8))
-        .border_style(&BLACK)
-        .draw()?;
-
-    root.present()?;
-    println!("Plot saved to {}", filename);
-    Ok(())
 }
