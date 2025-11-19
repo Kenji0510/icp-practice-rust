@@ -16,3 +16,6 @@ ndarray-rand = "0.14"
 
 kdtree = "0.7"
 rayon = "1.11.0"
+
+regex = "1.10"
+nohash-hasher = "0.2.0"
