@@ -1,11 +1,15 @@
+use std::{fs::File, io::BufReader};
+
 use anyhow::{Result, Context};
 use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
 use kdtree::{KdTree, distance::squared_euclidean};
+use nalgebra::{Rotation3, Vector3};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
 use ndarray_linalg::{Inverse, SVD, Solve};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use serde::Deserialize;
 // use rayon::prelude::*;
 
 // const WIDTH: f64 = 10.0;
@@ -16,13 +20,14 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
 const SAMPLE_SIZE: usize = 600;
 const TRIM_PERCENTAGE: f64 = 0.75;
-const K_NEIGHBORS: usize = 30;
-const MAX_ITERATIONS: usize = 20;
-const TOLERANCE: f64 = 0.015;
-const VOXEL_SIZE: f64 = 0.1;
+const K_NEIGHBORS: usize = 40;
+const MAX_ITERATIONS: usize = 25;
+const TOLERANCE: f64 = 0.012;  // Prev: 0.015
+const VOXEL_SIZE: f64 = 0.05;
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/4201/voxel-01";
+    let scan_interval = 0.1; // 10Hz = 0.1秒間隔
+    let target_pcd_dir = "data/input/4201/voxel-005";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -34,6 +39,20 @@ fn main() -> Result<()> {
     // for path in &pcd_paths {
     //     println!(" - {}", path.display());
     // }
+
+    println!("Loading IMU JSON...");
+    let imu_samples = load_and_flatten_imu_json("data/input/imu-json/imu_data.json")
+        .context("Failed to load IMU JSON data")?;
+    println!("Loaded {} IMU samples.", imu_samples.len());
+
+    if imu_samples.is_empty() {
+        return Err(anyhow::anyhow!("IMU data is empty"));
+    }
+    
+    // ★基準時刻の設定: IMUデータの最初の時間をスタート地点(T0)とする
+    // もし「PCDの方が5秒遅れて始まる」等のオフセットがある場合はここで調整してください
+    let base_timestamp = imu_samples[0].timestamp_sec;
+    println!("Base timestamp set to: {:.3}", base_timestamp);
 
     let initial_pcd = match load_pcd_xyz(pcd_paths[0].to_str().unwrap()) {
         Ok(data) => data,
@@ -66,6 +85,40 @@ fn main() -> Result<()> {
         };
         let current_pts = Points::new(current_pcd);
         let current_pts_arr = points_to_array2(&current_pts);
+
+        // このフレームの開始時刻 = 基準時刻 + (インデックス * 0.1秒)
+        let current_frame_start_time = base_timestamp + (i as f64 * scan_interval);
+
+        // 対応するIMUデータの平均角速度を取得
+        let avg_gyro = get_avg_gyro(
+            &imu_samples, 
+            current_frame_start_time, 
+            scan_interval
+        );
+
+        // デバッグ表示: ちゃんと値が取れているか確認
+        // println!(" - Time: {:.3}s ~ {:.3}s, Gyro: {:.3?}", 
+        //     current_frame_start_time, 
+        //     current_frame_start_time + scan_interval, 
+        //     avg_gyro
+        // );
+
+        // 歪み補正 (Deskewing) 実行
+        let mut current_pts_arr = match avg_gyro {
+            Some(gyro) => {
+                deskew_point_cloud(&current_pts_arr, &gyro, scan_interval)
+            }
+            None => {
+                eprintln!("Warning: No IMU data for frame {} time window [{:.3}, {:.3}), using original points",
+                    i, current_frame_start_time, current_frame_start_time + scan_interval);
+                current_pts_arr  // Use original points if no IMU data
+            }
+        };
+
+        // 2. ★ここで距離フィルタを実行★
+        // 例: 0.5m 以内(自分)と、30m 以遠(ノイズ)をカット
+        // 屋内なら 20.0〜30.0m、屋外でも 50.0m 程度で切るのが一般的
+        let current_pts_arr = filter_by_range(&current_pts_arr, 0.1, 20.0);
 
         // Create KdTree for target points
         println!("Building k-d tree for target points...");
@@ -745,4 +798,146 @@ fn find_closest_indices(
         closest_indices.push(min_idx);
     }
     closest_indices
+}
+
+// JSONの構造に合わせた定義
+#[derive(Debug, Deserialize)]
+struct LivoxImuBatch {
+    timestamp: u64, // ナノ秒と仮定 (例: 484350964530)
+    angular_velocity: Vec<[f32; 3]>,
+    // sample_count は Vecのlen()でわかるので無視してもOK
+}
+
+// 扱いやすいように変換した後の1サンプルあたりの構造体
+#[derive(Debug, Clone)]
+struct ImuSample {
+    timestamp_sec: f64, // 計算しやすいように秒単位(f64)に変換して持つ
+    gyro: Array1<f64>,
+}
+
+/// JSONファイルを読み込み、時間順に並んだサンプルのリストを返す
+fn load_and_flatten_imu_json(path: &str) -> Result<Vec<ImuSample>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let batches: Vec<LivoxImuBatch> = serde_json::from_reader(reader)?;
+
+    let mut samples = Vec::new();
+    let interval_sec = 0.005; // 200Hz = 5ms
+
+    for batch in batches {
+        // バッチの基準時刻 (u64ナノ秒 -> f64秒 に変換)
+        // ※もしJSONのtimestampがマイクロ秒やミリ秒なら、ここの割り算を変えてください
+        let start_time_sec = batch.timestamp as f64 / 1_000_000_000.0;
+
+        for (i, gyro) in batch.angular_velocity.iter().enumerate() {
+            // 各サンプルの時刻を計算
+            let current_time = start_time_sec + (i as f64 * interval_sec);
+            
+            samples.push(ImuSample {
+                timestamp_sec: current_time,
+                gyro: arr1(&[gyro[0] as f64, gyro[1] as f64, gyro[2] as f64]),
+            });
+        }
+    }
+
+    // 念のため時間順にソート（JSONが順番通りなら不要だが安全のため）
+    samples.sort_by(|a, b| a.timestamp_sec.partial_cmp(&b.timestamp_sec).unwrap());
+
+    Ok(samples)
+}
+
+/// 指定された開始時刻から duration (秒) の間の平均角速度を計算
+fn get_avg_gyro(
+    all_samples: &[ImuSample], 
+    frame_start_time: f64, 
+    duration: f64
+) -> Option<Array1<f64>> {
+    let frame_end_time = frame_start_time + duration;
+    
+    let mut sum = Array1::<f64>::zeros(3);
+    let mut count = 0;
+
+    // バイナリサーチで開始位置を探すと高速だが、今回は単純なフィルタで実装
+    // (データ量が膨大なら skip_while 等で最適化してください)
+    for sample in all_samples {
+        if sample.timestamp_sec >= frame_start_time && sample.timestamp_sec < frame_end_time {
+            sum = sum + &sample.gyro;
+            count += 1;
+        }
+        // 時間を過ぎたらループを抜ける（ソート済み前提）
+        if sample.timestamp_sec >= frame_end_time {
+             break; // 最適化: これ以上後ろは見なくていい
+        }
+    }
+
+    if count > 0 {
+        Some(sum / (count as f64))
+    } else {
+        None
+    }
+}
+
+// --- ヘルパー3: 歪み補正 (Deskewing) ---
+fn deskew_point_cloud(
+    points: &Array2<f64>,
+    angular_velocity: &Array1<f64>,
+    scan_duration: f64,
+) -> Array2<f64> {
+    let n_points = points.nrows();
+    let mut corrected_points = Array2::<f64>::zeros((n_points, 3));
+    
+    // nalgebraのVector3に変換
+    let omega = Vector3::new(angular_velocity[0], angular_velocity[1], angular_velocity[2]);
+
+    for i in 0..n_points {
+        // 点群が時間順に並んでいる前提で、リニアに時刻を推定
+        let ratio = i as f64 / n_points as f64;
+        let dt = ratio * scan_duration;
+
+        // 回転ベクトル = 角速度 * 経過時間
+        // ※もし補正方向が逆なら -omega * dt にする
+        let angle_axis = omega * dt;
+        
+        // 回転行列
+        let rotation = Rotation3::new(angle_axis);
+        
+        // 座標変換
+        let p = Vector3::new(points[[i, 0]], points[[i, 1]], points[[i, 2]]);
+        let p_corrected = rotation * p;
+
+        corrected_points[[i, 0]] = p_corrected.x;
+        corrected_points[[i, 1]] = p_corrected.y;
+        corrected_points[[i, 2]] = p_corrected.z;
+    }
+    corrected_points
+}
+
+/// 距離によるフィルタリング (Pass-through filter based on Range)
+/// min_range: これより近い点は削除 (例: 0.5m - 自分自身の映り込み除去)
+/// max_range: これより遠い点は削除 (例: 40.0m - 精度低下防止)
+fn filter_by_range(points: &Array2<f64>, min_range: f64, max_range: f64) -> Array2<f64> {
+    let n_points = points.nrows();
+    
+    // 結果を格納するバッファ（最大サイズで確保しておくと再確保が起きない）
+    let mut valid_indices = Vec::with_capacity(n_points);
+    
+    let min_sq = min_range * min_range;
+    let max_sq = max_range * max_range;
+
+    // 各点の距離判定
+    for i in 0..n_points {
+        let x = points[[i, 0]];
+        let y = points[[i, 1]];
+        let z = points[[i, 2]];
+        
+        // 平方根(sqrt)を取ると重いので、二乗のまま比較するのが高速化のコツ
+        let dist_sq = x*x + y*y + z*z;
+
+        if dist_sq >= min_sq && dist_sq <= max_sq {
+            valid_indices.push(i);
+        }
+    }
+
+    // 有効な点だけを抽出して新しいArray2を作る
+    points.select(Axis(0), &valid_indices)
 }
