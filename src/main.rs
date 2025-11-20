@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader};
+use std::{collections::VecDeque, fs::File, io::BufReader};
 
 use anyhow::{Result, Context};
 use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
@@ -7,7 +7,7 @@ use nalgebra::{Rotation3, Vector3};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
-use ndarray_linalg::{Inverse, SVD, Solve};
+use ndarray_linalg::{Inverse, Norm, SVD, Solve};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::Deserialize;
 // use rayon::prelude::*;
@@ -20,9 +20,9 @@ use serde::Deserialize;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
 const SAMPLE_SIZE: usize = 600;
 const TRIM_PERCENTAGE: f64 = 0.75;
-const K_NEIGHBORS: usize = 40;
+const K_NEIGHBORS: usize = 20;
 const MAX_ITERATIONS: usize = 25;
-const TOLERANCE: f64 = 0.012;  // Prev: 0.015
+const TOLERANCE: f64 = 0.001;  // Prev: 0.015
 const VOXEL_SIZE: f64 = 0.05;
 
 fn main() -> Result<()> {
@@ -69,6 +69,29 @@ fn main() -> Result<()> {
     let mut current_global_pose = Array2::<f64>::eye(4);
     let mut last_delta_transform = Array2::<f64>::eye(4); // 直近の速度（移動量）を保持
 
+    // Local map queue
+    let mut local_map_queue: VecDeque<(Array2<f64>, Array2<f64>)> = VecDeque::new();
+    const LOCAL_MAP_SIZE: usize = 10;
+
+    // Global map accumulator
+    let mut global_map_accumulator: Vec<Array2<f64>> = Vec::new();
+    global_map_accumulator.push(initial_pts_arr.clone());
+
+    // 初期フレームの法線を計算してキューに入れる処理
+    {
+        // 初期フレーム用のKdTreeと法線計算
+        let mut kdtree_init = KdTree::new(initial_pts_arr.ncols());
+        // ... (add points to kdtree) ...
+        for (i, r) in initial_pts_arr.rows().into_iter().enumerate() {
+             kdtree_init.add(r.as_slice().unwrap().to_vec(), i).unwrap();
+        }
+        let viewpoint = arr1(&[0.0, 0.0, 0.0]);
+        let initial_normals = calculate_normals(&initial_pts_arr, &kdtree_init, &viewpoint)?;
+        
+        local_map_queue.push_back((initial_pts_arr.clone(), initial_normals));
+        global_map_accumulator.push(initial_pts_arr.clone());
+    }
+
     for (i, pcd_path) in pcd_paths.iter().enumerate() {
         println!("PCD File {}: {}", i, pcd_path.display());
         if i == 0 {
@@ -83,61 +106,98 @@ fn main() -> Result<()> {
                 continue;
             }
         };
-        let current_pts = Points::new(current_pcd);
-        let current_pts_arr = points_to_array2(&current_pts);
 
-        // このフレームの開始時刻 = 基準時刻 + (インデックス * 0.1秒)
+        let start_time = std::time::Instant::now();
+        let current_pts = Points::new(current_pcd);
+        // let current_pts_arr = points_to_array2(&current_pts);
+
+        // // このフレームの開始時刻 = 基準時刻 + (インデックス * 0.1秒)
         let current_frame_start_time = base_timestamp + (i as f64 * scan_interval);
 
-        // 対応するIMUデータの平均角速度を取得
+        // // 対応するIMUデータの平均角速度を取得
         let avg_gyro = get_avg_gyro(
             &imu_samples, 
             current_frame_start_time, 
             scan_interval
         );
 
-        // デバッグ表示: ちゃんと値が取れているか確認
-        // println!(" - Time: {:.3}s ~ {:.3}s, Gyro: {:.3?}", 
-        //     current_frame_start_time, 
-        //     current_frame_start_time + scan_interval, 
-        //     avg_gyro
-        // );
+        // // デバッグ表示: ちゃんと値が取れているか確認
+        // // println!(" - Time: {:.3}s ~ {:.3}s, Gyro: {:.3?}", 
+        // //     current_frame_start_time, 
+        // //     current_frame_start_time + scan_interval, 
+        // //     avg_gyro
+        // // );
 
-        // 歪み補正 (Deskewing) 実行
-        let mut current_pts_arr = match avg_gyro {
-            Some(gyro) => {
-                deskew_point_cloud(&current_pts_arr, &gyro, scan_interval)
-            }
-            None => {
-                eprintln!("Warning: No IMU data for frame {} time window [{:.3}, {:.3}), using original points",
-                    i, current_frame_start_time, current_frame_start_time + scan_interval);
-                current_pts_arr  // Use original points if no IMU data
-            }
-        };
+        // // 歪み補正 (Deskewing) 実行
+        // let mut current_pts_arr = match avg_gyro {
+        //     Some(gyro) => {
+        //         deskew_point_cloud(&current_pts_arr, &gyro, scan_interval)
+        //     }
+        //     None => {
+        //         eprintln!("Warning: No IMU data for frame {} time window [{:.3}, {:.3}), using original points",
+        //             i, current_frame_start_time, current_frame_start_time + scan_interval);
+        //         current_pts_arr  // Use original points if no IMU data
+        //     }
+        // };
 
-        // 2. ★ここで距離フィルタを実行★
-        // 例: 0.5m 以内(自分)と、30m 以遠(ノイズ)をカット
-        // 屋内なら 20.0〜30.0m、屋外でも 50.0m 程度で切るのが一般的
-        let current_pts_arr = filter_by_range(&current_pts_arr, 0.1, 20.0);
+        // // 2. ★ここで距離フィルタを実行★
+        // // 例: 0.5m 以内(自分)と、30m 以遠(ノイズ)をカット
+        // // 屋内なら 20.0〜30.0m、屋外でも 50.0m 程度で切るのが一般的
+        // let current_pts_arr = filter_by_range(&current_pts_arr, 0.1, 20.0);
+
+        // Preprocess for current points: deskew and range filter
+        let current_pts_arr = preprocess_point_cloud(
+            &current_pts,
+            avg_gyro.as_ref(),
+            scan_interval,
+            0.1,
+            20.0
+        );
+        let elapsed_preprocess = start_time.elapsed();
+
+        // Concatenate local map points
+        let local_map_views: Vec<_> = local_map_queue.iter()
+            .map(|(p, _)| p.view())
+            .collect();
+        target_pts_arr = ndarray::concatenate(
+            Axis(0),  // 縦方向（行方向）に結合
+            &local_map_views
+        ).context("Failed to concatenate arrays for local map")?;
+
+        // Concatenate normals for local map
+        let local_map_normals_views: Vec<_> = local_map_queue.iter().map(|(_, n)| n.view()).collect();
+        let target_normals = ndarray::concatenate(Axis(0), &local_map_normals_views)?;
 
         // Create KdTree for target points
         println!("Building k-d tree for target points...");
         let n_dims_target = target_pts_arr.ncols();
-        let mut kdtree: KdTree<f64, usize, Vec<f64>> = KdTree::new(n_dims_target);
+        let mut kdtree_target: KdTree<f64, usize, Vec<f64>> = KdTree::new(n_dims_target);
 
         for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
             let point_slice = point_row.as_slice().unwrap();
-            kdtree.add(point_slice.to_vec(), i).unwrap();
+            kdtree_target.add(point_slice.to_vec(), i).unwrap();
         }
         println!("k-d tree built with {} points.", target_pts_arr.nrows());
+        let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
 
         // Calculate normals for target points
-        let viewpoint: Array1<f64> = arr1(&[0.0, 0.0, 0.0]);
-        println!("Calculating normals for target points (k={})...", K_NEIGHBORS);
-        // let start_normals = std::time::Instant::now();
+        // let viewpoint: Array1<f64> = arr1(&[0.0, 0.0, 0.0]);
+        // println!("Calculating normals for target points (k={})...", K_NEIGHBORS);
 
-        let target_normals = calculate_normals(&target_pts_arr, &kdtree, &viewpoint)
-            .context("Failed to calculate normals")?;
+        // let target_normals = calculate_normals(&target_pts_arr, &kdtree, &viewpoint)
+        //     .context("Failed to calculate normals")?;
+        // let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
+
+        // Current用のKdTree (法線計算のためだけに一時作成)
+        let mut kdtree_current: KdTree<f64, usize, Vec<f64>> = KdTree::new(3);
+        for (i, point_row) in current_pts_arr.rows().into_iter().enumerate() {
+            kdtree_current.add(point_row.as_slice().unwrap().to_vec(), i).unwrap();
+        }
+
+        // Sourceの法線を計算 (数千点なので高速)
+        let viewpoint = arr1(&[0.0, 0.0, 0.0]); // ローカル座標系での視点
+        let current_normals_arr = calculate_normals(&current_pts_arr, &kdtree_current, &viewpoint)?;
+        let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
 
         let predicted_pose = last_delta_transform.dot(&current_global_pose);
         // let mut total_transform = current_global_pose.clone();
@@ -152,6 +212,7 @@ fn main() -> Result<()> {
         let mut rng = thread_rng();
         let source_indices: Vec<usize> = (0..source_points_num).collect();
 
+        let start_icp_time = std::time::Instant::now();
         for i in 0..MAX_ITERATIONS {
             // --- 2b. "現在" のソース点群を計算 ---
             // (N, 4) = (N, 4) .dot (4, 4)
@@ -174,7 +235,7 @@ fn main() -> Result<()> {
 
             // --- 2c. `find_closest_pairs_kdtree` の呼び出し (戻り値が3つに) ---
             let (matched_target_pts, matched_target_indices, distance_sq) = 
-                find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree);
+                find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree_target);
 
             // (Trimming (インライア選択) - 変更なし)
             let mut dist_with_indices: Vec<(f64, usize)> = distance_sq.iter()
@@ -239,49 +300,67 @@ fn main() -> Result<()> {
                 break;
             }
         }
+        let elapsed_icp = start_icp_time.elapsed();
 
         let new_delta = total_transform.dot(&current_global_pose.inv().unwrap());
+
+        // 移動量を計算 (回転行列のトレースから角度を、平行移動ベクトルから距離を算出)
+        let translation_diff = new_delta.slice(s![0..3, 3]).norm(); // 移動距離 (m)
+        let trace = new_delta.diag().sum();
+        let cos_theta = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0);
+        let rotation_diff = cos_theta.acos().abs(); // 回転角 (rad)
 
         last_delta_transform = new_delta;
         current_global_pose = total_transform.clone();
 
-        // let cloned_source_pts = original_source_pts.clone();
-        // let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
-        // let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
+        // ★修正: 「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
+        // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
+        const MOVE_THRESHOLD: f64 = 0.02; // 2cm以上動いたら
+        const ANGLE_THRESHOLD: f64 = 0.5; // 約0.5度以上回ったら
 
-        // target_pts_arr = ndarray::concatenate(
-        //     Axis(0), 
-        //     &[target_pts_arr.view(), final_aligned_source_pts_arr.view()])
-        //     .context("Failed to concatenate arrays")?;
-
-        // target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
-        // println!("After voxel downsampling: {} points", target_pts_arr.nrows());
-
-        if i % 10 == 0 {
-            println!("Updating map at frame {}", i);
+        if i < 10 || translation_diff > MOVE_THRESHOLD || rotation_diff > ANGLE_THRESHOLD {
+            // println!("Updating local map at frame {}", i);
             
-            // ソース点群を現在の推定位置に変換
+            // 1. 点群の変換
             let cloned_source_pts = original_source_pts.clone();
             let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
-            let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
+            let aligned_pts = final_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
-            // 地図に結合
-            target_pts_arr = ndarray::concatenate(
-                Axis(0), 
-                &[target_pts_arr.view(), final_aligned_source_pts_arr.view()])
-                .context("Failed to concatenate arrays")?;
+            // 2. 法線の回転
+            let rotation_matrix = total_transform.slice(s![0..3, 0..3]);
+            let aligned_normals = current_normals_arr.dot(&rotation_matrix.t());
 
-            // ボクセルダウンサンプリング（地図が肥大化しないように）
-            target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
+            // 3. ローカルマップに追加 (毎フレームに近い頻度で行われる)
+            local_map_queue.push_back((aligned_pts.clone(), aligned_normals.clone()));
+            
+            if local_map_queue.len() > LOCAL_MAP_SIZE {
+                local_map_queue.pop_front();
+            }
+
+            // 4. グローバルマップへの保存 (こちらは容量節約のため、たまにでOK)
+            // ここは i % 5 のままで良いですし、上記と同じ移動判定を使っても良いです
+            if i % 5 == 0 {
+                global_map_accumulator.push(aligned_pts.to_owned());
+            }
         }
 
         // Debug
         if i % 10 == 0 {
-            let merged_points = array2_to_points(&target_pts_arr);
+            // 最後に global_map_accumulator を全部結合して保存
+            let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+            let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+            let final_map_points = array2_to_points(&voxelized_final_map);
             let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
-            merged_points.save_pcd(&debug_save_path, (0, 255, 0))
+            final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
                 .context("Failed to save debug merged PCD file")?;
         }
+
+        println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, normals time: {:.3?}, ICP time: {:.3?}",
+            elapsed_preprocess,
+            elapsed_kdtree,
+            elapsed_normals,
+            elapsed_icp
+        );
     }
 
     // Save final merged point cloud
@@ -290,183 +369,65 @@ fn main() -> Result<()> {
     final_points.save_pcd(final_save_path, (255, 0, 0))
         .context("Failed to save final merged PCD file")?;
 
-    // let target_pcd_file_path = "data/input/avia/voxelized-025_frame_400.pcd";
-    // let source_pcd_file_path = "data/input/avia/voxelized-025_frame_410.pcd";
-    // let target_d = load_pcd_xyz(target_pcd_file_path)
-    //     .context("Failed to load PCD file")?;
-    // let source_d = load_pcd_xyz(source_pcd_file_path)
-    //     .context("Failed to load PCD file")?;
-
-    // let target_pts = Points::new(target_d);
-    // println!("Loaded {} points from {}", target_pts.points.len(), target_pcd_file_path);
-
-    // let source_pts = Points::new(source_d);
-    // println!("Loaded {} points from {}", source_pts.points.len(), source_pcd_file_path);
-
-    // let target_pts_arr = points_to_array2(&target_pts);
-    // let source_pts_arr = points_to_array2(&source_pts);
-
-    // let max_iterations = 20;
-    // let tolerance = 0.015;  // Prev: 1e-2
-
-    // // let current_source_pts_arr = source_pts_arr.clone();
-    // // let rng = thread_rng();
-    // // let n_points_source = current_source_pts_arr.nrows();
-    // // let source_indices: Vec<usize> = (0..n_points_source).collect();
-
-    // println!("Building k-d tree for target points...");
-    // let n_dims_target = target_pts_arr.ncols();
-    // let mut kdtree: KdTree<f64, usize, Vec<f64>> = KdTree::new(n_dims_target);
-
-    // for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
-    //     let point_slice = point_row.as_slice().unwrap();
-    //     kdtree.add(point_slice.to_vec(), i).unwrap();
-    // }
-    // println!("k-d tree built with {} points.", target_pts_arr.nrows());
-
-    // let viewpoint: Array1<f64> = arr1(&[0.0, 0.0, 0.0]);
-    // println!("Calculating normals for target points (k={})...", K_NEIGHBORS);
-    // let start_normals = std::time::Instant::now();
-
-    // let target_normals = calculate_normals(&target_pts_arr, &kdtree, &viewpoint)
-    //     .context("Failed to calculate normals")?;
-    // let elapsed_normals = start_normals.elapsed();
-    // println!("Normals calculated in {:.2?}", elapsed_normals);
-
-    // let target_pts_with_normals = create_points_with_normals(&target_pts_arr, &target_normals);
-
-    // let normals_save_path = "data/output/with-normals/target_with_normals.pcd";
-    // match save_pcd_with_normals(&target_pts_with_normals, normals_save_path) {
-    //     Ok(_) => println!("Saved target points with normals to {}", normals_save_path),
-    //     Err(e) => eprintln!("Failed to save PCD file with normals: {}", e),
-    // }
-
-    // let mut total_transform = Array2::<f64>::eye(4);
-
-    // let n_points_source = source_pts_arr.nrows();
-    // let mut source_homogeneous = Array2::<f64>::ones((n_points_source, 4));
-    // source_homogeneous.slice_mut(s![.., 0..3]).assign(&source_pts_arr);
-
-    // let mut rng = thread_rng();
-    // let source_indices: Vec<usize> = (0..n_points_source).collect();
-
-    // let start = std::time::Instant::now();
-    // for i in 0..max_iterations {
-    //     // --- 2b. "現在" のソース点群を計算 ---
-    //     // (N, 4) = (N, 4) .dot (4, 4)
-    //     let current_transformed_homogeneous = source_homogeneous.dot(&total_transform.t());
-    //     // (N, 3) の座標に戻す
-    //     let current_source_pts_arr = current_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
-
-    //     // (サンプリングは current_source_pts_arr から行う - 変更なし)
-    //     let (sampled_source_pts, _) = 
-    //         if n_points_source <= SAMPLE_SIZE {
-    //             (current_source_pts_arr.clone(), source_indices.clone())
-    //         } else {
-    //             let indices = source_indices.as_slice()
-    //                 .choose_multiple(&mut rng, SAMPLE_SIZE)
-    //                 .cloned()
-    //                 .collect::<Vec<usize>>();
-
-    //             (current_source_pts_arr.select(Axis(0), &indices), indices)
-    //         };
-
-    //     // --- 2c. `find_closest_pairs_kdtree` の呼び出し (戻り値が3つに) ---
-    //     let (matched_target_pts, matched_target_indices, distance_sq) = 
-    //         find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree);
-
-    //     // (Trimming (インライア選択) - 変更なし)
-    //     let mut dist_with_indices: Vec<(f64, usize)> = distance_sq.iter()
-    //         .cloned()
-    //         .enumerate()
-    //         .map(|(idx, dist)| (dist, idx))
-    //         .collect();
-    //     dist_with_indices.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    //     let n_to_keep = (dist_with_indices.len() as f64 * TRIM_PERCENTAGE) as usize;
-    //     let inlier_indices: Vec<usize> = dist_with_indices.iter()
-    //         .take(n_to_keep)
-    //         .map(|&(_dist, idx)| idx)
-    //         .collect();
-        
-    //     // (インライアの点群を取得 - 変更なし)
-    //     let inlier_source_pts = sampled_source_pts.select(Axis(0), &inlier_indices);
-    //     let inlier_target_pts = matched_target_pts.select(Axis(0), &inlier_indices);
-
-    //     // --- 2d. インライアの "法線" を取得 (★重要★) ---
-    //     // `inlier_indices` を使って `matched_target_indices` から "グローバルインデックス" を取得
-    //     let inlier_target_global_indices: Vec<usize> = inlier_indices.iter()
-    //         .map(|&idx_n| matched_target_indices[idx_n]) // idx_n は 0..N_sample のインデックス
-    //         .collect();
-    //     // グローバルインデックスを使って `target_normals` から法線を抽出
-    //     let inlier_target_normals = target_normals.select(Axis(0), &inlier_target_global_indices);
-
-    //     // --- 2e. "Point-to-Plane" の計算を呼び出し ---
-    //     let delta_transform = match calculate_transformation_pt_to_plane(
-    //         &inlier_source_pts,
-    //         &inlier_target_pts,
-    //         &inlier_target_normals
-    //     ) {
-    //         Ok(tf) => tf,
-    //         Err(e) => {
-    //             eprintln!("Warning: Failed to solve transformation, skipping iteration: {}", e);
-    //             continue; // このイテレーションをスキップ
-    //         }
-    //     };
-
-    //     // --- 2f. "総" 変換行列を更新 ---
-    //     // T_k+1 = DeltaT * T_k
-    //     total_transform = delta_transform.dot(&total_transform);
-        
-    //     // --- 2g. エラー計算 (Point-to-Plane 誤差を推奨) ---
-    //     let current_error = calculate_mean_pt_to_plane_error(
-    //         &inlier_source_pts, 
-    //         &inlier_target_pts, 
-    //         &inlier_target_normals,
-    //         &delta_transform // "今から" 適用する変換
-    //     );
-        
-    //     println!("Iteration {}: mean pt-to-plane error (from {} inliers, {:.0}% kept) = {}", 
-    //         i + 1, 
-    //         inlier_indices.len(), 
-    //         TRIM_PERCENTAGE * 100.0,
-    //         current_error
-    //     );
-
-    //     if current_error < tolerance {
-    //         println!("Converged at iteration {}", i + 1);
-    //         break;
-    //     }
-
-    // }
-    // let elapsed = start.elapsed();
-    // println!("ICP completed in {:.2?}", elapsed);
-
-    // // --- 2h. 最終結果の計算 ---
-    // // 最終的な `total_transform` を "元" の `source_homogeneous` に適用
-    // let final_transformed_homogeneous = source_homogeneous.dot(&total_transform.t());
-    // let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
-
-    // println!("Final aligned source points:\n{:?}", total_transform);
-
-    // // plot_points(&source_pts, &target_pts, &current_source_pts, "icp_final.png", "Final State").unwrap();
-
-    // let aligned_source_pts = array2_to_points(&final_aligned_source_pts_arr.to_owned());
-    // let colored_target_pts = target_pts.transform_colored_points((0, 0, 255)); // 青
-    // let colored_source_pts = source_pts.transform_colored_points((255, 0, 0)); // 赤
-    // let colored_aligned_source_pts = aligned_source_pts.transform_colored_points((0, 255, 0)); // 緑
-
-    // let mut all_points = colored_target_pts.clone();
-    // all_points.extend(colored_aligned_source_pts.clone());
-    // all_points.extend(colored_source_pts.clone());
-
-    // // Save each point clouds
-    // let save_path = "data/output/icp_p-to-plane_aligned_result_v-025.pcd";
-    // match save_pcd(&all_points, save_path) {
-    //     Ok(_) => println!("Saved aligned points to {}", save_path),
-    //     Err(e) => eprintln!("Failed to save PCD file: {}", e),
-    // }
-
     Ok(())
+}
+
+fn preprocess_point_cloud(
+    points: &Points,
+    gyro: Option<&Array1<f64>>,
+    scan_interval: f64,
+    min_dist: f64,
+    max_dist: f64,
+) -> Array2<f64> {
+    let n_points = points.points.len();
+
+    let mut valid_points_flat = Vec::with_capacity(n_points * 3);
+
+    // Angular velocities
+    let (wx, wy, wz) = match gyro {
+        Some(g) => (g[0], g[1], g[2]),
+        None => (0.0, 0.0, 0.0),
+    };
+
+    for (i, p) in points.points.iter().enumerate() {
+        let mut x = p.x as f64;
+        let mut y = p.y as f64;
+        let mut z = p.z as f64;
+
+        // Filter by range
+        let dist_sq = x * x + y * y + z * z;
+        if dist_sq < min_dist * min_dist || dist_sq > max_dist * max_dist {
+            continue;
+        }
+
+        // Deskewing
+        // 2. 歪み補正 (Deskewing)
+        // IMUデータが存在し、かつ角速度がほぼゼロでない場合のみ計算
+        if gyro.is_some() && (wx.abs() > 1e-6 || wy.abs() > 1e-6 || wz.abs() > 1e-6) {
+            let ratio = i as f64 / n_points as f64;
+            let dt = ratio * scan_interval;
+
+            // ロドリゲスの回転公式の簡易版（微小回転近似）
+            // R ≈ I + [ω]_x * dt
+            // これにより sin/cos の計算コストを削減できる（精度が必要なら正規のロドリゲスを使用）
+            let dx = (wy * z - wz * y) * dt;
+            let dy = (wz * x - wx * z) * dt;
+            let dz = (wx * y - wy * x) * dt;
+
+            x += dx;
+            y += dy;
+            z += dz;
+        }
+
+        // 3. データの格納
+        valid_points_flat.push(x);
+        valid_points_flat.push(y);
+        valid_points_flat.push(z);
+    }
+
+    let n_valid = valid_points_flat.len() / 3;
+    Array2::from_shape_vec((n_valid, 3), valid_points_flat)
+        .expect("Failed to create Array2 from valid points")
 }
 
 /// Point-to-Plane の平均二乗誤差 (RMSE) を計算する
