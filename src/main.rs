@@ -3,7 +3,7 @@ use std::{collections::VecDeque, fs::File, io::BufReader};
 use anyhow::{Result, Context};
 use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
 use kdtree::{KdTree, distance::squared_euclidean};
-use nalgebra::{Rotation3, Vector3};
+use nalgebra::{Matrix3, Rotation3, SymmetricEigen, Vector3};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
@@ -18,12 +18,12 @@ use serde::Deserialize;
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 600;
-const TRIM_PERCENTAGE: f64 = 0.75;
+const SAMPLE_SIZE: usize = 300;
+const TRIM_PERCENTAGE: f64 = 0.9;
 const K_NEIGHBORS: usize = 20;
-const MAX_ITERATIONS: usize = 25;
-const TOLERANCE: f64 = 0.001;  // Prev: 0.015
-const VOXEL_SIZE: f64 = 0.05;
+const MAX_ITERATIONS: usize = 30;
+const TOLERANCE: f64 = 0.010;  // Prev: 0.015
+const VOXEL_SIZE: f64 = 0.1;
 
 fn main() -> Result<()> {
     let scan_interval = 0.1; // 10Hz = 0.1秒間隔
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let mut last_delta_transform = Array2::<f64>::eye(4); // 直近の速度（移動量）を保持
 
     // Local map queue
-    let mut local_map_queue: VecDeque<(Array2<f64>, Array2<f64>)> = VecDeque::new();
+    let mut local_map_queue: VecDeque<Array2<f64>> = VecDeque::new();
     const LOCAL_MAP_SIZE: usize = 10;
 
     // Global map accumulator
@@ -80,15 +80,16 @@ fn main() -> Result<()> {
     // 初期フレームの法線を計算してキューに入れる処理
     {
         // 初期フレーム用のKdTreeと法線計算
-        let mut kdtree_init = KdTree::new(initial_pts_arr.ncols());
+        let mut kdtree_init: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
         // ... (add points to kdtree) ...
         for (i, r) in initial_pts_arr.rows().into_iter().enumerate() {
-             kdtree_init.add(r.as_slice().unwrap().to_vec(), i).unwrap();
+             let point: [f64; 3] = [r[0], r[1], r[2]];
+             kdtree_init.add(point, i).unwrap();
         }
         let viewpoint = arr1(&[0.0, 0.0, 0.0]);
-        let initial_normals = calculate_normals(&initial_pts_arr, &kdtree_init, &viewpoint)?;
+        // let initial_normals = calculate_normals(&initial_pts_arr, &kdtree_init, &viewpoint)?;
         
-        local_map_queue.push_back((initial_pts_arr.clone(), initial_normals));
+        local_map_queue.push_back(initial_pts_arr.clone());
         global_map_accumulator.push(initial_pts_arr.clone());
     }
 
@@ -157,28 +158,31 @@ fn main() -> Result<()> {
 
         // Concatenate local map points
         let local_map_views: Vec<_> = local_map_queue.iter()
-            .map(|(p, _)| p.view())
+            .map(|p| p.view())
             .collect();
         target_pts_arr = ndarray::concatenate(
             Axis(0),  // 縦方向（行方向）に結合
             &local_map_views
         ).context("Failed to concatenate arrays for local map")?;
 
-        // Concatenate normals for local map
-        let local_map_normals_views: Vec<_> = local_map_queue.iter().map(|(_, n)| n.view()).collect();
-        let target_normals = ndarray::concatenate(Axis(0), &local_map_normals_views)?;
+        target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
 
         // Create KdTree for target points
         println!("Building k-d tree for target points...");
-        let n_dims_target = target_pts_arr.ncols();
-        let mut kdtree_target: KdTree<f64, usize, Vec<f64>> = KdTree::new(n_dims_target);
+        // let n_dims_target = target_pts_arr.ncols();
+        let mut kdtree_target: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
 
         for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
             let point_slice = point_row.as_slice().unwrap();
-            kdtree_target.add(point_slice.to_vec(), i).unwrap();
+            let point: [f64; 3] = [point_slice[0], point_slice[1], point_slice[2]];
+            kdtree_target.add(point, i).unwrap();
         }
         println!("k-d tree built with {} points.", target_pts_arr.nrows());
         let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
+
+        // Concatenate normals for local map
+        // let local_map_normals_views: Vec<_> = local_map_queue.iter().map(|(_, n)| n.view()).collect();
+        // let target_normals = ndarray::concatenate(Axis(0), &local_map_normals_views)?;
 
         // Calculate normals for target points
         // let viewpoint: Array1<f64> = arr1(&[0.0, 0.0, 0.0]);
@@ -189,14 +193,20 @@ fn main() -> Result<()> {
         // let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
 
         // Current用のKdTree (法線計算のためだけに一時作成)
-        let mut kdtree_current: KdTree<f64, usize, Vec<f64>> = KdTree::new(3);
+        let mut kdtree_current: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
         for (i, point_row) in current_pts_arr.rows().into_iter().enumerate() {
-            kdtree_current.add(point_row.as_slice().unwrap().to_vec(), i).unwrap();
+            let point: [f64; 3] = [point_row[0], point_row[1], point_row[2]];
+            kdtree_current.add(point, i).unwrap();
         }
 
         // Sourceの法線を計算 (数千点なので高速)
-        let viewpoint = arr1(&[0.0, 0.0, 0.0]); // ローカル座標系での視点
-        let current_normals_arr = calculate_normals(&current_pts_arr, &kdtree_current, &viewpoint)?;
+        let tx = current_global_pose[[0, 3]];
+        let ty = current_global_pose[[1, 3]];
+        let tz = current_global_pose[[2, 3]];
+        let viewpoint = arr1(&[tx, ty, tz]); // ローカル座標系での視点
+        // let current_normals_arr = calculate_normals(&current_pts_arr, &kdtree_current, &viewpoint)?;
+        // let target_normals = calculate_normals(&target_pts_arr, &kdtree_target, &viewpoint)?;
+        let target_normals = calculate_normals_optimized(&target_pts_arr, &kdtree_target, &viewpoint)?;
         let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
 
         let predicted_pose = last_delta_transform.dot(&current_global_pose);
@@ -328,10 +338,10 @@ fn main() -> Result<()> {
 
             // 2. 法線の回転
             let rotation_matrix = total_transform.slice(s![0..3, 0..3]);
-            let aligned_normals = current_normals_arr.dot(&rotation_matrix.t());
+            // let aligned_normals = current_normals_arr.dot(&rotation_matrix.t());
 
             // 3. ローカルマップに追加 (毎フレームに近い頻度で行われる)
-            local_map_queue.push_back((aligned_pts.clone(), aligned_normals.clone()));
+            local_map_queue.push_back(aligned_pts.clone());
             
             if local_map_queue.len() > LOCAL_MAP_SIZE {
                 local_map_queue.pop_front();
@@ -612,9 +622,106 @@ fn create_points_with_normals(
     result
 }
 
+fn calculate_normals_optimized(
+    target_pts: &Array2<f64>,
+    kdtree: &KdTree<f64, usize, [f64; 3]>,
+    viewpoint: &Array1<f64>,
+) -> Result<Array2<f64>> {
+    let n_points = target_pts.nrows();
+    
+    // 結果を格納する配列 (スレッドセーフに書き込むため UnsafeCell あるいは Vec で collect する)
+    // Rayonの map/collect を使うのが最も安全で高速です
+    let normals_vec: Vec<Vec<f64>> = (0..n_points).into_par_iter().map(|i| {
+        // 1. Query Point の取得
+        // ndarrayの行アクセスは少し遅いので、生ポインタ的アクセスかgetを使う
+        let qx = target_pts[[i, 0]];
+        let qy = target_pts[[i, 1]];
+        let qz = target_pts[[i, 2]];
+        let query_point = [qx, qy, qz];
+
+        // 2. 近傍探索
+        let neighbors = match kdtree.nearest(&query_point, K_NEIGHBORS, &squared_euclidean) {
+            Ok(n) => n,
+            Err(_) => return vec![0.0, 0.0, 0.0], // エラー時はゼロ法線
+        };
+
+        if neighbors.len() < 3 {
+            return vec![0.0, 0.0, 0.0];
+        }
+
+        // 3. 共分散行列の計算 (メモリ確保なし版)
+        // Cov = E[XX^T] - E[X]E[X]^T を利用して1パスで計算する
+        // または、重心を求めてから差分を累積する2パスでも、配列確保よりは速い
+        
+        // --- パス1: 重心 (Centroid) 計算 ---
+        let mut sum = Vector3::zeros();
+        for &(_, idx) in &neighbors {
+            let nx = target_pts[[*idx, 0]];
+            let ny = target_pts[[*idx, 1]];
+            let nz = target_pts[[*idx, 2]];
+            sum += Vector3::new(nx, ny, nz);
+        }
+        let k_f64 = neighbors.len() as f64;
+        let centroid = sum / k_f64;
+
+        // --- パス2: 共分散行列 (Covariance Matrix) 計算 ---
+        // nalgebra の Matrix3 を使う (スタック確保なので爆速)
+        let mut cov = Matrix3::zeros();
+        for &(_, idx) in &neighbors {
+            let nx = target_pts[[*idx, 0]];
+            let ny = target_pts[[*idx, 1]];
+            let nz = target_pts[[*idx, 2]];
+            
+            let d = Vector3::new(nx, ny, nz) - centroid;
+            // 外積 (d * d^T) を加算
+            cov += d * d.transpose();
+        }
+        // 通常は N-1 で割るが、固有ベクトルの向きには影響しないので省略可
+        // cov /= k_f64; 
+
+        // 4. 固有値分解 (Symmetric Eigen decomposition)
+        // 共分散行列は対称行列なので、SVDより高速な SymmetricEigen を使用
+        let eigen = SymmetricEigen::new(cov);
+        
+        // nalgebraのeigenvaluesはVector3なのでイテレータで回して探す
+        let (min_idx, _) = eigen.eigenvalues.iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+
+        // そのインデックスに対応する固有ベクトルを取得
+        let mut normal = eigen.eigenvectors.column(min_idx).into_owned();
+
+        // 法線の正規化（念のため）
+        let norm = normal.norm();
+        if norm < 1e-12 {
+            return vec![0.0, 0.0, 0.0];
+        }
+        normal /= norm;
+
+        // 5. 視点方向への向き統一
+        let view_dir = Vector3::new(viewpoint[0], viewpoint[1], viewpoint[2]) - centroid;
+        if normal.dot(&view_dir) < 0.0 {
+            normal = -normal;
+        }
+
+        vec![normal.x, normal.y, normal.z]
+    }).collect();
+
+    // Vec<Vec<f64>> -> Array2<f64> への変換 (コストは軽微)
+    let mut normals_arr = Array2::<f64>::zeros((n_points, 3));
+    for (i, normal) in normals_vec.into_iter().enumerate() {
+        normals_arr[[i, 0]] = normal[0];
+        normals_arr[[i, 1]] = normal[1];
+        normals_arr[[i, 2]] = normal[2];
+    }
+
+    Ok(normals_arr)
+}
+
 fn calculate_normals(
     target_pts: &Array2<f64>,
-    kdtree: &KdTree<f64, usize, Vec<f64>>,
+    kdtree: &KdTree<f64, usize, [f64; 3]>,
     viewpoint: &Array1<f64>,
 ) -> Result<Array2<f64>> {
     let n_points = target_pts.nrows();
@@ -622,9 +729,9 @@ fn calculate_normals(
 
     azip!((mut normal_row in normals.axis_iter_mut(Axis(0)),
         p_row in target_pts.axis_iter(Axis(0))) {
-        let query_point = p_row.to_slice().unwrap();
+        let query_point = [p_row[0], p_row[1], p_row[2]];
         let neighbors = kdtree.nearest(
-            query_point,
+            &query_point,
             K_NEIGHBORS,
             &squared_euclidean
         ).unwrap();
@@ -694,7 +801,7 @@ fn points_to_array2(
 fn find_closest_pairs_kdtree(
     source_pts: &Array2<f64>,      // サンプリングされた source 点群
     target_pts: &Array2<f64>,      // target 全体 (インデックスから点を引くため)
-    kdtree: &KdTree<f64, usize, Vec<f64>> // 事前に構築した tree
+    kdtree: &KdTree<f64, usize, [f64; 3]> // 事前に構築した tree
 ) -> (Array2<f64>, Vec<usize>, Vec<f64>) {
     
     let n = source_pts.nrows();
@@ -702,10 +809,10 @@ fn find_closest_pairs_kdtree(
     let results: Vec<(usize, f64)> = (0..n).into_par_iter()
         .map(|i| {
             let source_row = source_pts.row(i);
-            let query_point = source_row.as_slice().unwrap();
+            let query_point = [source_row[0], source_row[1], source_row[2]];
 
             let neighbors = kdtree.nearest(
-                query_point, 
+                &query_point, 
                 1, 
                 &squared_euclidean
             ).unwrap();
