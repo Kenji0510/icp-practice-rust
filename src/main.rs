@@ -21,8 +21,8 @@ use serde::Deserialize;
 const SAMPLE_SIZE: usize = 300;
 const TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 15;
-const MAX_ITERATIONS: usize = 10;
-const TOLERANCE: f64 = 0.035;  // Prev: 0.015
+const MAX_ITERATIONS: usize = 5;
+const TOLERANCE: f64 = 0.040;  // Prev: 0.015
 const VOXEL_SIZE: f64 = 0.2;
 
 fn main() -> Result<()> {
