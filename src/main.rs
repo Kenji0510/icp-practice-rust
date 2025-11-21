@@ -3,7 +3,7 @@ use std::{collections::VecDeque, fs::File, io::BufReader};
 use anyhow::{Result, Context};
 use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
 use kdtree::{KdTree, distance::squared_euclidean};
-use nalgebra::{Matrix3, Rotation3, SymmetricEigen, Vector3};
+use nalgebra::{Matrix3, Matrix6, Rotation3, SymmetricEigen, Vector3, Vector6};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
@@ -19,11 +19,11 @@ use serde::Deserialize;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
 const SAMPLE_SIZE: usize = 300;
-const TRIM_PERCENTAGE: f64 = 0.9;
-const K_NEIGHBORS: usize = 20;
-const MAX_ITERATIONS: usize = 30;
-const TOLERANCE: f64 = 0.010;  // Prev: 0.015
-const VOXEL_SIZE: f64 = 0.1;
+const TRIM_PERCENTAGE: f64 = 1.0;
+const K_NEIGHBORS: usize = 15;
+const MAX_ITERATIONS: usize = 15;
+const TOLERANCE: f64 = 0.013;  // Prev: 0.015
+const VOXEL_SIZE: f64 = 0.2;
 
 fn main() -> Result<()> {
     let scan_interval = 0.1; // 10Hz = 0.1秒間隔
@@ -147,14 +147,16 @@ fn main() -> Result<()> {
         // let current_pts_arr = filter_by_range(&current_pts_arr, 0.1, 20.0);
 
         // Preprocess for current points: deskew and range filter
-        let current_pts_arr = preprocess_point_cloud(
+        let mut current_pts_arr = preprocess_point_cloud(
             &current_pts,
             avg_gyro.as_ref(),
             scan_interval,
-            0.1,
-            20.0
+            0.05,
+            15.0,
         );
         let elapsed_preprocess = start_time.elapsed();
+
+        current_pts_arr = voxel_downsample_array2(&current_pts_arr, VOXEL_SIZE);
 
         // Concatenate local map points
         let local_map_views: Vec<_> = local_map_queue.iter()
@@ -274,6 +276,7 @@ fn main() -> Result<()> {
 
             // --- 2e. "Point-to-Plane" の計算を呼び出し ---
             let delta_transform = match calculate_transformation_pt_to_plane(
+            // let delta_transform = match calculate_transformation_pt_to_plane_optimized(
                 &inlier_source_pts,
                 &inlier_target_pts,
                 &inlier_target_normals
@@ -470,7 +473,125 @@ fn calculate_mean_pt_to_plane_error(
     (errors.sum() / n as f64).sqrt() // 二乗平均平方根 (RMSE)
 }
 
-// (古い `calculate_mean_error` は削除してもOKです)
+fn calculate_transformation_pt_to_plane_optimized(
+    inlier_source_pts: &Array2<f64>,
+    inlier_target_pts: &Array2<f64>,
+    inlier_target_normals: &Array2<f64>
+) -> Result<Array2<f64>> {
+    
+    // Rayon による並列 Map-Reduce パターン
+    // 各スレッドで 6x6 行列 (H) と 6x1 ベクトル (b) を部分的に計算して足し合わせる
+    let (h, g) = (0..inlier_source_pts.nrows())
+        .into_par_iter()
+        .fold(
+            || (Matrix6::zeros(), Vector6::zeros()), // 初期値 (各スレッドのローカル変数)
+            |(mut acc_h, mut acc_g), i| {
+                // データの読み出し (スタック変数へ)
+                let s_x = inlier_source_pts[[i, 0]];
+                let s_y = inlier_source_pts[[i, 1]];
+                let s_z = inlier_source_pts[[i, 2]];
+                let ps = Vector3::new(s_x, s_y, s_z);
+
+                let t_x = inlier_target_pts[[i, 0]];
+                let t_y = inlier_target_pts[[i, 1]];
+                let t_z = inlier_target_pts[[i, 2]];
+                let pt = Vector3::new(t_x, t_y, t_z);
+
+                let n_x = inlier_target_normals[[i, 0]];
+                let n_y = inlier_target_normals[[i, 1]];
+                let n_z = inlier_target_normals[[i, 2]];
+                let n = Vector3::new(n_x, n_y, n_z);
+
+                // --- Jacobian (J) の計算 ---
+                // J = [ (ps x n)^T,  n^T ]  (1行6列)
+                
+                // 1. 回転成分: ps と n の外積
+                let cross = ps.cross(&n);
+
+                // 2. 6次元ベクトル J_vec を作成
+                // alpha, beta, gamma, tx, ty, tz の順に対応
+                let j_vec = Vector6::new(
+                    cross[0], cross[1], cross[2], // 回転成分
+                    n[0],     n[1],     n[2]      // 平行移動成分
+                );
+
+                // --- 右辺 (Error) の計算 ---
+                // r = (pt - ps) . n
+                let diff = pt - ps;
+                let residual = diff.dot(&n);
+
+                // --- 累積 (Accumulation) ---
+                // H += J^T * J  (6x6行列の加算)
+                // G += J^T * r  (6x1ベクトルの加算)
+                
+                // nalgebra の syger (Rank-1 update) を使うとさらに速いが、
+                // 単純な加算でもコンパイラが最適化してくれる
+                acc_h += j_vec * j_vec.transpose();
+                acc_g += j_vec * residual;
+
+                (acc_h, acc_g)
+            }
+        )
+        .reduce(
+            || (Matrix6::zeros(), Vector6::zeros()), // Reduce時の初期値
+            |(h1, g1), (h2, g2)| {
+                (h1 + h2, g1 + g2) // 行列とベクトルの単純加算
+            }
+        );
+
+    // --- 連立方程式 Hx = g を解く ---
+    // 6x6 なので Cholesky分解 が高速
+    let x = h.cholesky()
+        .ok_or_else(|| anyhow::anyhow!("Cholesky decomposition failed (matrix not positive definite)"))?
+        .solve(&g);
+
+    // 結果のベクトル x = [alpha, beta, gamma, tx, ty, tz]
+    let alpha = x[0];
+    let beta = x[1];
+    let gamma = x[2];
+    let tx = x[3];
+    let ty = x[4];
+    let tz = x[5];
+
+    // --- 回転行列の構築 (ここは以前と同じロジック) ---
+    let theta_sq = alpha*alpha + beta*beta + gamma*gamma;
+    let r_mat: nalgebra::Matrix3<f64>;
+
+    if theta_sq < 1e-12 {
+        // 微小回転近似
+        r_mat = nalgebra::Matrix3::new(
+             1.0, -gamma,  beta,
+             gamma,  1.0, -alpha,
+            -beta,  alpha,  1.0
+        );
+    } else {
+        let theta = theta_sq.sqrt();
+        let k = Vector3::new(alpha, beta, gamma) / theta;
+        let k_cross = nalgebra::Matrix3::new(
+            0.0, -k.z, k.y,
+            k.z, 0.0, -k.x,
+            -k.y, k.x, 0.0
+        );
+        // Rodrigues
+        let i = nalgebra::Matrix3::identity();
+        r_mat = i + k_cross * theta.sin() + (k_cross * k_cross) * (1.0 - theta.cos());
+    }
+
+    // --- Array2<f64> (4x4) に変換して返す ---
+    let mut delta_t = Array2::<f64>::eye(4);
+    
+    // 回転成分コピー
+    delta_t[[0,0]] = r_mat[(0,0)]; delta_t[[0,1]] = r_mat[(0,1)]; delta_t[[0,2]] = r_mat[(0,2)];
+    delta_t[[1,0]] = r_mat[(1,0)]; delta_t[[1,1]] = r_mat[(1,1)]; delta_t[[1,2]] = r_mat[(1,2)];
+    delta_t[[2,0]] = r_mat[(2,0)]; delta_t[[2,1]] = r_mat[(2,1)]; delta_t[[2,2]] = r_mat[(2,2)];
+    
+    // 平行移動成分
+    delta_t[[0,3]] = tx;
+    delta_t[[1,3]] = ty;
+    delta_t[[2,3]] = tz;
+
+    Ok(delta_t)
+}
 
 fn calculate_transformation_pt_to_plane(
     inlier_source_pts: &Array2<f64>, // 現在のイテレーションのソース点 (N x 3)
