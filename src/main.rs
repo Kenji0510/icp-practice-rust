@@ -173,17 +173,21 @@ fn main() -> Result<()> {
         println!("Building k-d tree for target points...");
         // let n_dims_target = target_pts_arr.ncols();
         // let mut kdtree_target: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
-        let mut kdtree_target: kiddo::KdTree<f64, 3> = kiddo::KdTree::new();
+        let kdtree_target: kiddo::KdTree<f64, 3> = kiddo::KdTree::new();
+        let target_points: Vec<[f64; 3]> = target_pts_arr.outer_iter()
+            .map(|row| [row[0], row[1], row[2]])
+            .collect();
+        let mut kdtree_target: kiddo::ImmutableKdTree<f64, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
 
         // for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
         //     let point_slice = point_row.as_slice().unwrap();
         //     let point: [f64; 3] = [point_slice[0], point_slice[1], point_slice[2]];
         //     kdtree_target.add(point, i).unwrap();
         // }
-        for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
-            let p: [f64; 3] = [point_row[0], point_row[1], point_row[2]];
-            kdtree_target.add(&p, i as u64);
-        }
+        // for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
+        //     let p: [f64; 3] = [point_row[0], point_row[1], point_row[2]];
+        //     kdtree_target.add(&p, i as u64);
+        // }
         println!("k-d tree built with {} points.", target_pts_arr.nrows());
         let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
 
@@ -761,7 +765,8 @@ fn create_points_with_normals(
 fn calculate_normals_optimized(
     target_pts: &Array2<f64>,
     // kdtree: &KdTree<f64, usize, [f64; 3]>,
-    kdtree: &kiddo::KdTree<f64, 3>,
+    // kdtree: &kiddo::KdTree<f64, 3>,
+    kdtree: &kiddo::ImmutableKdTree<f64, 3>,
     viewpoint: &Array1<f64>,
 ) -> Result<Array2<f64>> {
     let n_points = target_pts.nrows();
@@ -781,7 +786,8 @@ fn calculate_normals_optimized(
         //     Ok(n) => n,
         //     Err(_) => return vec![0.0, 0.0, 0.0], // エラー時はゼロ法線
         // };
-        let neighbors = kdtree.nearest_n::<kiddo::SquaredEuclidean>(&query_point, K_NEIGHBORS);
+        let k = std::num::NonZeroUsize::new(K_NEIGHBORS).unwrap();
+        let neighbors = kdtree.nearest_n::<kiddo::SquaredEuclidean>(&query_point, k);
 
         if neighbors.len() < 3 {
             return vec![0.0, 0.0, 0.0];
@@ -942,7 +948,8 @@ fn find_closest_pairs_kdtree(
     source_pts: &Array2<f64>,      // サンプリングされた source 点群
     target_pts: &Array2<f64>,      // target 全体 (インデックスから点を引くため)
     // kdtree: &KdTree<f64, usize, [f64; 3]> // 事前に構築した tree
-    kdtree: &kiddo::KdTree<f64, 3>
+    // kdtree: &kiddo::KdTree<f64, 3>
+    kdtree: &kiddo::ImmutableKdTree<f64, 3>
 ) -> (Array2<f64>, Vec<usize>, Vec<f64>) {
     
     let n = source_pts.nrows();
@@ -952,7 +959,8 @@ fn find_closest_pairs_kdtree(
             let source_row = source_pts.row(i);
             let query_point = [source_row[0], source_row[1], source_row[2]];
 
-            let neighbors = kdtree.nearest_n::<kiddo::SquaredEuclidean>(&query_point, 1);
+            let k = std::num::NonZeroUsize::new(1).unwrap();
+            let neighbors = kdtree.nearest_n::<kiddo::SquaredEuclidean>(&query_point, k);
 
             let neighbor = neighbors[0];
             let dist_sq = neighbor.distance;
