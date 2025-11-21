@@ -376,6 +376,15 @@ fn main() -> Result<()> {
         );
     }
 
+    println!("Current global pose:\n{}", current_global_pose);
+    let tx = current_global_pose[[0, 3]];
+    let ty = current_global_pose[[1, 3]];
+    let tz = current_global_pose[[2, 3]];
+
+    // 初期位置からの直線距離
+    let distance_from_start = (tx*tx + ty*ty + tz*tz).sqrt();
+    println!("Distance from start: {:.3} meters", distance_from_start);
+
     // Save final merged point cloud
     let final_points = array2_to_points(&target_pts_arr);
     let final_save_path = "data/output/icp_map/final_merged.pcd";
