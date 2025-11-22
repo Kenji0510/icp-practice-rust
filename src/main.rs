@@ -22,8 +22,8 @@ const SAMPLE_SIZE: usize = 300;
 const TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 15;
 const MAX_ITERATIONS: usize = 5;
-const TOLERANCE: f64 = 0.040;  // Prev: 0.015
-const VOXEL_SIZE: f64 = 0.2;
+const TOLERANCE: f32 = 0.040;  // Prev: 0.015
+const VOXEL_SIZE: f32 = 0.2;
 
 fn main() -> Result<()> {
     let scan_interval = 0.1; // 10Hz = 0.1秒間隔
@@ -66,24 +66,24 @@ fn main() -> Result<()> {
     let initial_pts_arr = points_to_array2(&initial_pts);
     let mut target_pts_arr = initial_pts_arr.clone();
 
-    let mut current_global_pose = Array2::<f64>::eye(4);
-    let mut last_delta_transform = Array2::<f64>::eye(4); // 直近の速度（移動量）を保持
+    let mut current_global_pose = Array2::<f32>::eye(4);
+    let mut last_delta_transform = Array2::<f32>::eye(4); // 直近の速度（移動量）を保持
 
     // Local map queue
-    let mut local_map_queue: VecDeque<Array2<f64>> = VecDeque::new();
+    let mut local_map_queue: VecDeque<Array2<f32>> = VecDeque::new();
     const LOCAL_MAP_SIZE: usize = 10;
 
     // Global map accumulator
-    let mut global_map_accumulator: Vec<Array2<f64>> = Vec::new();
+    let mut global_map_accumulator: Vec<Array2<f32>> = Vec::new();
     global_map_accumulator.push(initial_pts_arr.clone());
 
     // 初期フレームの法線を計算してキューに入れる処理
     {
         // 初期フレーム用のKdTreeと法線計算
-        let mut kdtree_init: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
+        let mut kdtree_init: KdTree<f32, usize, [f32; 3]> = KdTree::new(3);
         // ... (add points to kdtree) ...
         for (i, r) in initial_pts_arr.rows().into_iter().enumerate() {
-             let point: [f64; 3] = [r[0], r[1], r[2]];
+             let point: [f32; 3] = [r[0], r[1], r[2]];
              kdtree_init.add(point, i).unwrap();
         }
         let viewpoint = arr1(&[0.0, 0.0, 0.0]);
@@ -151,8 +151,8 @@ fn main() -> Result<()> {
             &current_pts,
             avg_gyro.as_ref(),
             scan_interval,
-            0.05,
-            15.0,
+            0.05 as f32,
+            15.0 as f32,
         );
         let elapsed_preprocess = start_time.elapsed();
 
@@ -174,41 +174,13 @@ fn main() -> Result<()> {
         // let n_dims_target = target_pts_arr.ncols();
         // let mut kdtree_target: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
         let kdtree_target: kiddo::KdTree<f64, 3> = kiddo::KdTree::new();
-        let target_points: Vec<[f64; 3]> = target_pts_arr.outer_iter()
+        let target_points: Vec<[f32; 3]> = target_pts_arr.outer_iter()
             .map(|row| [row[0], row[1], row[2]])
             .collect();
-        let mut kdtree_target: kiddo::ImmutableKdTree<f64, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
+        let mut kdtree_target: kiddo::ImmutableKdTree<f32, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
 
-        // for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
-        //     let point_slice = point_row.as_slice().unwrap();
-        //     let point: [f64; 3] = [point_slice[0], point_slice[1], point_slice[2]];
-        //     kdtree_target.add(point, i).unwrap();
-        // }
-        // for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
-        //     let p: [f64; 3] = [point_row[0], point_row[1], point_row[2]];
-        //     kdtree_target.add(&p, i as u64);
-        // }
         println!("k-d tree built with {} points.", target_pts_arr.nrows());
         let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
-
-        // Concatenate normals for local map
-        // let local_map_normals_views: Vec<_> = local_map_queue.iter().map(|(_, n)| n.view()).collect();
-        // let target_normals = ndarray::concatenate(Axis(0), &local_map_normals_views)?;
-
-        // Calculate normals for target points
-        // let viewpoint: Array1<f64> = arr1(&[0.0, 0.0, 0.0]);
-        // println!("Calculating normals for target points (k={})...", K_NEIGHBORS);
-
-        // let target_normals = calculate_normals(&target_pts_arr, &kdtree, &viewpoint)
-        //     .context("Failed to calculate normals")?;
-        // let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
-
-        // Current用のKdTree (法線計算のためだけに一時作成)
-        // let mut kdtree_current: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
-        // for (i, point_row) in current_pts_arr.rows().into_iter().enumerate() {
-        //     let point: [f64; 3] = [point_row[0], point_row[1], point_row[2]];
-        //     kdtree_current.add(point, i).unwrap();
-        // }
 
         // Sourceの法線を計算 (数千点なので高速)
         let tx = current_global_pose[[0, 3]];
@@ -227,7 +199,7 @@ fn main() -> Result<()> {
 
         // Copy source points for current frame
         let source_points_num = current_pts_arr.nrows();
-        let mut original_source_pts = Array2::<f64>::ones((source_points_num, 4));
+        let mut original_source_pts = Array2::<f32>::ones((source_points_num, 4));
         original_source_pts.slice_mut(s![.., 0..3]).assign(&current_pts_arr);
 
         let mut rng = thread_rng();
@@ -259,7 +231,7 @@ fn main() -> Result<()> {
                 find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree_target);
 
             // (Trimming (インライア選択) - 変更なし)
-            let mut dist_with_indices: Vec<(f64, usize)> = distance_sq.iter()
+            let mut dist_with_indices: Vec<(f32, usize)> = distance_sq.iter()
                 .cloned()
                 .enumerate()
                 .map(|(idx, dist)| (dist, idx))
@@ -338,8 +310,8 @@ fn main() -> Result<()> {
 
         // ★修正: 「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
-        const MOVE_THRESHOLD: f64 = 0.02; // 2cm以上動いたら
-        const ANGLE_THRESHOLD: f64 = 0.5; // 約0.5度以上回ったら
+        const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
+        const ANGLE_THRESHOLD: f32 = 0.5; // 約0.5度以上回ったら
 
         if i < 10 || translation_diff > MOVE_THRESHOLD || rotation_diff > ANGLE_THRESHOLD {
             // println!("Updating local map at frame {}", i);
@@ -408,23 +380,23 @@ fn preprocess_point_cloud(
     points: &Points,
     gyro: Option<&Array1<f64>>,
     scan_interval: f64,
-    min_dist: f64,
-    max_dist: f64,
-) -> Array2<f64> {
+    min_dist: f32,
+    max_dist: f32,
+) -> Array2<f32> {
     let n_points = points.points.len();
 
     let mut valid_points_flat = Vec::with_capacity(n_points * 3);
 
     // Angular velocities
     let (wx, wy, wz) = match gyro {
-        Some(g) => (g[0], g[1], g[2]),
+        Some(g) => (g[0] as f32, g[1] as f32, g[2] as f32),
         None => (0.0, 0.0, 0.0),
     };
 
     for (i, p) in points.points.iter().enumerate() {
-        let mut x = p.x as f64;
-        let mut y = p.y as f64;
-        let mut z = p.z as f64;
+        let mut x = p.x as f32;
+        let mut y = p.y as f32;
+        let mut z = p.z as f32;
 
         // Filter by range
         let dist_sq = x * x + y * y + z * z;
@@ -436,8 +408,8 @@ fn preprocess_point_cloud(
         // 2. 歪み補正 (Deskewing)
         // IMUデータが存在し、かつ角速度がほぼゼロでない場合のみ計算
         if gyro.is_some() && (wx.abs() > 1e-6 || wy.abs() > 1e-6 || wz.abs() > 1e-6) {
-            let ratio = i as f64 / n_points as f64;
-            let dt = ratio * scan_interval;
+            let ratio = i as f32 / n_points as f32;
+            let dt = ratio * scan_interval as f32;
 
             // ロドリゲスの回転公式の簡易版（微小回転近似）
             // R ≈ I + [ω]_x * dt
@@ -464,16 +436,16 @@ fn preprocess_point_cloud(
 
 /// Point-to-Plane の平均二乗誤差 (RMSE) を計算する
 fn calculate_mean_pt_to_plane_error(
-    source_pts: &Array2<f64>, // 適用 "前" のソース点
-    target_pts: &Array2<f64>,
-    target_normals: &Array2<f64>,
-    delta_transform: &Array2<f64> // "今から" 適用する微小変換
-) -> f64 {
+    source_pts: &Array2<f32>, // 適用 "前" のソース点
+    target_pts: &Array2<f32>,
+    target_normals: &Array2<f32>,
+    delta_transform: &Array2<f32> // "今から" 適用する微小変換
+) -> f32 {
     
     let n = source_pts.nrows();
     
     // ソース点を同次座標系 (N, 4) に
-    let mut source_homogeneous = Array2::<f64>::ones((n, 4));
+    let mut source_homogeneous = Array2::<f32>::ones((n, 4));
     source_homogeneous.slice_mut(s![.., 0..3]).assign(source_pts);
 
     // 微小変換を適用
@@ -489,7 +461,7 @@ fn calculate_mean_pt_to_plane_error(
         .sum_axis(Axis(1))     // 行ごとに合計 (＝内積)
         .mapv(|val| val * val); // 2乗する
 
-    (errors.sum() / n as f64).sqrt() // 二乗平均平方根 (RMSE)
+    (errors.sum() / n as f32).sqrt() // 二乗平均平方根 (RMSE)
 }
 
 fn calculate_transformation_pt_to_plane_optimized(
@@ -613,17 +585,17 @@ fn calculate_transformation_pt_to_plane_optimized(
 }
 
 fn calculate_transformation_pt_to_plane(
-    inlier_source_pts: &Array2<f64>, // 現在のイテレーションのソース点 (N x 3)
-    inlier_target_pts: &Array2<f64>, // 対応するターゲット点 (N x 3)
-    inlier_target_normals: &Array2<f64> // 対応するターゲット法線 (N x 3)
-) -> Result<Array2<f64>> { // 4x4 の "微小" 変換行列 (Delta T) を返す
+    inlier_source_pts: &Array2<f32>, // 現在のイテレーションのソース点 (N x 3)
+    inlier_target_pts: &Array2<f32>, // 対応するターゲット点 (N x 3)
+    inlier_target_normals: &Array2<f32> // 対応するターゲット法線 (N x 3)
+) -> Result<Array2<f32>> { // 4x4 の "微小" 変換行列 (Delta T) を返す
 
     let n_inliers = inlier_source_pts.nrows();
     
     // A (ヤコビアン) は N x 6 の行列
-    let mut a = Array2::<f64>::zeros((n_inliers, 6));
+    let mut a = Array2::<f32>::zeros((n_inliers, 6));
     // b (誤差) は N x 1 のベクトル
-    let mut b = Array1::<f64>::zeros(n_inliers);
+    let mut b = Array1::<f32>::zeros(n_inliers);
 
     // azip! を使って並列に A と b を構築
     azip!((
@@ -665,7 +637,7 @@ fn calculate_transformation_pt_to_plane(
     // x = (A^T A)^-1 * (A^T b)
     let x = at_a.solve(&at_b)
     .map_err(|e| anyhow::anyhow!("Linear solve failed: {:?}", e))
-    .or_else(|_|  -> Result<Array1<f64>> {
+    .or_else(|_|  -> Result<Array1<f32>> {
         // もし A^T A が特異行列 (解けない) なら、SVDで擬似逆行列を使って解く
         // (これはロバスト性のためのフォールバック)
         println!("Warning: Falling back to SVD solver for linear system.");
@@ -690,7 +662,7 @@ fn calculate_transformation_pt_to_plane(
 
     // 1. 回転ベクトル [α, β, γ] から「厳密な」3x3回転行列 R を計算
     let theta = (alpha*alpha + beta*beta + gamma*gamma).sqrt();
-    let r: Array2<f64>; // 3x3 回転行列 R
+    let r: Array2<f32>; // 3x3 回転行列 R
 
     if theta < 1e-9 {
         // theta がほぼゼロなら、小角度近似（元の行列）でも安全
@@ -763,17 +735,15 @@ fn create_points_with_normals(
 }
 
 fn calculate_normals_optimized(
-    target_pts: &Array2<f64>,
-    // kdtree: &KdTree<f64, usize, [f64; 3]>,
-    // kdtree: &kiddo::KdTree<f64, 3>,
-    kdtree: &kiddo::ImmutableKdTree<f64, 3>,
-    viewpoint: &Array1<f64>,
-) -> Result<Array2<f64>> {
+    target_pts: &Array2<f32>,
+    kdtree: &kiddo::ImmutableKdTree<f32, 3>,
+    viewpoint: &Array1<f32>,
+) -> Result<Array2<f32>> {
     let n_points = target_pts.nrows();
     
     // 結果を格納する配列 (スレッドセーフに書き込むため UnsafeCell あるいは Vec で collect する)
     // Rayonの map/collect を使うのが最も安全で高速です
-    let normals_vec: Vec<Vec<f64>> = (0..n_points).into_par_iter().map(|i| {
+    let normals_vec: Vec<Vec<f32>> = (0..n_points).into_par_iter().map(|i| {
         // 1. Query Point の取得
         // ndarrayの行アクセスは少し遅いので、生ポインタ的アクセスかgetを使う
         let qx = target_pts[[i, 0]];
@@ -806,8 +776,8 @@ fn calculate_normals_optimized(
             let nz = target_pts[[idx, 2]];
             sum += Vector3::new(nx, ny, nz);
         }
-        let k_f64 = neighbors.len() as f64;
-        let centroid = sum / k_f64;
+        let k_f32 = neighbors.len() as f32;
+        let centroid = sum / k_f32;
 
         // --- パス2: 共分散行列 (Covariance Matrix) 計算 ---
         // nalgebra の Matrix3 を使う (スタック確保なので爆速)
@@ -855,7 +825,7 @@ fn calculate_normals_optimized(
     }).collect();
 
     // Vec<Vec<f64>> -> Array2<f64> への変換 (コストは軽微)
-    let mut normals_arr = Array2::<f64>::zeros((n_points, 3));
+    let mut normals_arr = Array2::<f32>::zeros((n_points, 3));
     for (i, normal) in normals_vec.into_iter().enumerate() {
         normals_arr[[i, 0]] = normal[0];
         normals_arr[[i, 1]] = normal[1];
@@ -915,7 +885,7 @@ fn calculate_normals(
 }
 
 fn array2_to_points(
-    arr: &Array2<f64>
+    arr: &Array2<f32>
 ) -> Points {
     let mut pts = Vec::with_capacity(arr.len());
     for i in 0..arr.nrows() {
@@ -931,30 +901,27 @@ fn array2_to_points(
 
 fn points_to_array2(
     points: &Points
-) -> Array2<f64> {
+) -> Array2<f32> {
     let n = points.points.len();
-    let mut arr = Array2::<f64>::zeros((n, 3));
-
+    let mut arr = Array2::<f32>::zeros((n, 3));
     for (i, p) in points.points.iter().enumerate() {
-        arr[[i, 0]] = p.x as f64;
-        arr[[i, 1]] = p.y as f64;
-        arr[[i, 2]] = p.z as f64;
+        arr[[i, 0]] = p.x as f32;
+        arr[[i, 1]] = p.y as f32;
+        arr[[i, 2]] = p.z as f32;
     }
 
     arr
 }
 
 fn find_closest_pairs_kdtree(
-    source_pts: &Array2<f64>,      // サンプリングされた source 点群
-    target_pts: &Array2<f64>,      // target 全体 (インデックスから点を引くため)
-    // kdtree: &KdTree<f64, usize, [f64; 3]> // 事前に構築した tree
-    // kdtree: &kiddo::KdTree<f64, 3>
-    kdtree: &kiddo::ImmutableKdTree<f64, 3>
-) -> (Array2<f64>, Vec<usize>, Vec<f64>) {
+    source_pts: &Array2<f32>,      // サンプリングされた source 点群
+    target_pts: &Array2<f32>,      // target 全体 (インデックスから点を引くため)
+    kdtree: &kiddo::ImmutableKdTree<f32, 3>
+) -> (Array2<f32>, Vec<usize>, Vec<f32>) {
     
     let n = source_pts.nrows();
 
-    let results: Vec<(usize, f64)> = (0..n).into_par_iter()
+    let results: Vec<(usize, f32)> = (0..n).into_par_iter()
         .map(|i| {
             let source_row = source_pts.row(i);
             let query_point = [source_row[0], source_row[1], source_row[2]];
@@ -969,7 +936,7 @@ fn find_closest_pairs_kdtree(
         })
         .collect();
 
-    let (closest_indices, distance_sq): (Vec<usize>, Vec<f64>) = results.into_iter().unzip();
+    let (closest_indices, distance_sq): (Vec<usize>, Vec<f32>) = results.into_iter().unzip();
     
     // 見つかったインデックスのリストを使って、
     // target_pts から対応する点を一括で抽出する

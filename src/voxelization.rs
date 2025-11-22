@@ -9,7 +9,7 @@ type FastMap<V> = HashMap<u64, V, BuildHasherDefault<FxHasher>>;
 
 #[derive(Default)]
 struct VoxelStat {
-    sum: [f64; 3],
+    sum: [f32; 3],
     count: usize,
 }
 
@@ -38,7 +38,7 @@ fn morton3d(ix: u32, iy: u32, iz: u32) -> u64 {
     part1by2(ix) | (part1by2(iy) << 1) | (part1by2(iz) << 2)
 }
 
-pub fn voxel_downsample_array2(points: &Array2<f64>, voxel_size: f64) -> Array2<f64> {
+pub fn voxel_downsample_array2(points: &Array2<f32>, voxel_size: f32) -> Array2<f32> {
     let n_points = points.nrows();
     if n_points == 0 {
         return Array2::zeros((0, 3));
@@ -49,7 +49,7 @@ pub fn voxel_downsample_array2(points: &Array2<f64>, voxel_size: f64) -> Array2<
     let (min_corner, max_corner) = points.axis_iter(Axis(0))
         .into_par_iter()
         .fold(
-            || (vec![f64::INFINITY; 3], vec![f64::NEG_INFINITY; 3]),
+            || (vec![f32::INFINITY; 3], vec![f32::NEG_INFINITY; 3]),
             |(mut min_acc, mut max_acc), row| {
                 for i in 0..3 {
                     min_acc[i] = min_acc[i].min(row[i]);
@@ -59,7 +59,7 @@ pub fn voxel_downsample_array2(points: &Array2<f64>, voxel_size: f64) -> Array2<
             }
         )
         .reduce(
-            || (vec![f64::INFINITY; 3], vec![f64::NEG_INFINITY; 3]),
+            || (vec![f32::INFINITY; 3], vec![f32::NEG_INFINITY; 3]),
             |(min_a, max_a), (min_b, max_b)| {
                 (
                     vec![min_a[0].min(min_b[0]), min_a[1].min(min_b[1]), min_a[2].min(min_b[2])],
@@ -116,10 +116,10 @@ pub fn voxel_downsample_array2(points: &Array2<f64>, voxel_size: f64) -> Array2<
 
     // 3. 結果の生成
     let downsampled_count = global_map.len();
-    let mut result = Array2::<f64>::zeros((downsampled_count, 3));
+    let mut result = Array2::<f32>::zeros((downsampled_count, 3));
     
     for (i, stat) in global_map.values().enumerate() {
-        let count_f = stat.count as f64;
+        let count_f = stat.count as f32;
         result[[i, 0]] = stat.sum[0] / count_f;
         result[[i, 1]] = stat.sum[1] / count_f;
         result[[i, 2]] = stat.sum[2] / count_f;
