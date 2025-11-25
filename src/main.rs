@@ -27,7 +27,7 @@ const VOXEL_SIZE: f32 = 0.2;
 
 fn main() -> Result<()> {
     let scan_interval = 0.1; // 10Hz = 0.1秒間隔
-    let target_pcd_dir = "data/input/4201/voxel-005";
+    let target_pcd_dir = "data/input/mid360/pcd/voxel-005-20251125-03";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     // }
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/imu-json/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
 
@@ -152,7 +152,7 @@ fn main() -> Result<()> {
             avg_gyro.as_ref(),
             scan_interval,
             0.05 as f32,
-            15.0 as f32,
+            20.0 as f32,
         );
         let elapsed_preprocess = start_time.elapsed();
 
