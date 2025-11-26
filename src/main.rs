@@ -18,16 +18,16 @@ use serde::Deserialize;
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 300;
+const SAMPLE_SIZE: usize = 500;
 const TRIM_PERCENTAGE: f64 = 1.0;
-const K_NEIGHBORS: usize = 15;
-const MAX_ITERATIONS: usize = 25;
-const TOLERANCE: f32 = 0.040;  // Prev: 0.015
+const K_NEIGHBORS: usize = 20;
+const MAX_ITERATIONS: usize = 20;
+const TOLERANCE: f32 = 0.050;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.2;
 
 fn main() -> Result<()> {
     let scan_interval: f32 = 0.1; // 10Hz = 0.1秒間隔
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-03";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-07";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     // }
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-07/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -348,8 +348,9 @@ fn main() -> Result<()> {
 
         // 移動量を計算 (回転行列のトレースから角度を、平行移動ベクトルから距離を算出)
         let translation_diff = new_delta.slice(s![0..3, 3]).norm(); // 移動距離 (m)
-        let trace = new_delta.diag().sum();
-        let cos_theta = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0);
+        // let trace = new_delta.diag().sum();
+        let trace_3x3 = new_delta[[0, 0]] + new_delta[[1, 1]] + new_delta[[2, 2]];
+        let cos_theta = ((trace_3x3 - 1.0) / 2.0).clamp(-1.0, 1.0);
         let rotation_diff = cos_theta.acos().abs(); // 回転角 (rad)
 
         last_delta_transform = new_delta;
@@ -358,36 +359,44 @@ fn main() -> Result<()> {
         // ★修正: 「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
         const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
-        const ANGLE_THRESHOLD: f32 = 0.5; // 約0.5度以上回ったら
+        const ANGLE_THRESHOLD: f32 = 0.035; // 約0.5度以上回ったら
 
-        if i < 10 || translation_diff > MOVE_THRESHOLD || rotation_diff > ANGLE_THRESHOLD {
-            // println!("Updating local map at frame {}", i);
+        // if i < 10 || rotation_diff < ANGLE_THRESHOLD || translation_diff > MOVE_THRESHOLD {
+        // if i < 10 || rotation_diff < ANGLE_THRESHOLD {
+        if i < 10 || translation_diff > MOVE_THRESHOLD {
+            println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
             
-            // 1. 点群の変換
-            let cloned_source_pts = original_source_pts.clone();
-            let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
-            let aligned_pts = final_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
+            // if translation_diff > MOVE_THRESHOLD {
+            if rotation_diff < ANGLE_THRESHOLD {
+                // 1. 点群の変換
+                let cloned_source_pts = original_source_pts.clone();
+                let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
+                let aligned_pts = final_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
-            // 2. 法線の回転
-            let rotation_matrix = total_transform.slice(s![0..3, 0..3]);
-            // let aligned_normals = current_normals_arr.dot(&rotation_matrix.t());
+                // 2. 法線の回転
+                let rotation_matrix = total_transform.slice(s![0..3, 0..3]);
+                // let aligned_normals = current_normals_arr.dot(&rotation_matrix.t());
 
-            // 3. ローカルマップに追加 (毎フレームに近い頻度で行われる)
-            local_map_queue.push_back(aligned_pts.clone());
-            
-            if local_map_queue.len() > LOCAL_MAP_SIZE {
-                local_map_queue.pop_front();
-            }
+                // 3. ローカルマップに追加 (毎フレームに近い頻度で行われる)
+                // local_map_queue.push_back(aligned_pts.clone());
+                if i % 2 == 0 {
+                    local_map_queue.push_back(aligned_pts.clone());
+                }
+                
+                if local_map_queue.len() > LOCAL_MAP_SIZE {
+                    local_map_queue.pop_front();
+                }
 
-            // 4. グローバルマップへの保存 (こちらは容量節約のため、たまにでOK)
-            // ここは i % 5 のままで良いですし、上記と同じ移動判定を使っても良いです
-            if i % 5 == 0 {
-                global_map_accumulator.push(aligned_pts.to_owned());
+                // 4. グローバルマップへの保存 (こちらは容量節約のため、たまにでOK)
+                // ここは i % 5 のままで良いですし、上記と同じ移動判定を使っても良いです
+                if i % 5 == 0 {
+                    global_map_accumulator.push(aligned_pts.to_owned());
+                }
             }
         }
 
         // Debug
-        if i % 10 == 0 {
+        if i % 20 == 0 {
             // 最後に global_map_accumulator を全部結合して保存
             let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
             let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
