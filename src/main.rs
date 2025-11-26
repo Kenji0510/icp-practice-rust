@@ -27,7 +27,7 @@ const VOXEL_SIZE: f32 = 0.2;
 
 fn main() -> Result<()> {
     let scan_interval: f32 = 0.1; // 10Hz = 0.1秒間隔
-    let target_pcd_dir = "data/input/mid360/pcd/voxel-005-20251125-03";
+    let target_pcd_dir = "data/input/mid360/pcd/voxel-005-20251125-05";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     // }
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-05/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
 
@@ -192,11 +192,10 @@ fn main() -> Result<()> {
         println!("Building k-d tree for target points...");
         // let n_dims_target = target_pts_arr.ncols();
         // let mut kdtree_target: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
-        let kdtree_target: kiddo::KdTree<f64, 3> = kiddo::KdTree::new();
         let target_points: Vec<[f32; 3]> = target_pts_arr.outer_iter()
             .map(|row| [row[0], row[1], row[2]])
             .collect();
-        let mut kdtree_target: kiddo::ImmutableKdTree<f32, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
+        let kdtree_target: kiddo::ImmutableKdTree<f32, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
 
         println!("k-d tree built with {} points.", target_pts_arr.nrows());
         let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
