@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, fs::File, io::BufReader, usize};
 
 use anyhow::{Result, Context};
-use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
+use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, PointXYZT, Points, load_pcd_xyz, load_pcd_xyzt, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
 use kdtree::{KdTree, distance::squared_euclidean};
 use nalgebra::{Matrix3, Matrix6, Rotation3, SymmetricEigen, UnitQuaternion, Vector3, Vector6};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
@@ -27,7 +27,7 @@ const VOXEL_SIZE: f32 = 0.2;
 
 fn main() -> Result<()> {
     let scan_interval: f32 = 0.1; // 10Hz = 0.1秒間隔
-    let target_pcd_dir = "data/input/mid360/pcd/voxel-005-20251125-05";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-03";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -41,7 +41,8 @@ fn main() -> Result<()> {
     // }
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-05/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
+    // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
 
@@ -54,7 +55,8 @@ fn main() -> Result<()> {
     let base_timestamp = imu_samples[0].timestamp_sec;
     println!("Base timestamp set to: {:.3}", base_timestamp);
 
-    let initial_pcd = match load_pcd_xyz(pcd_paths[0].to_str().unwrap()) {
+    // let initial_pcd = match load_pcd_xyz(pcd_paths[0].to_str().unwrap()) {
+    let initial_pcd = match load_pcd_xyzt(pcd_paths[0].to_str().unwrap()) {
         Ok(data) => data,
         Err(e) => {
             eprintln!("Error loading initial PCD file: {}", e);
@@ -62,8 +64,9 @@ fn main() -> Result<()> {
         }
     };
 
-    let initial_pts = Points::new(initial_pcd);
-    let initial_pts_arr = points_to_array2(&initial_pts);
+    // let initial_pts = Points::new(initial_pcd);
+    // let initial_pts_arr = points_to_array2(&initial_pts);
+    let initial_pts_arr = point_xyzt_to_array2(&initial_pcd);
     let mut target_pts_arr = initial_pts_arr.clone();
 
     let mut current_global_pose = Array2::<f32>::eye(4);
@@ -102,7 +105,8 @@ fn main() -> Result<()> {
         }
 
         // Loading current frame pcd
-        let current_pcd = match load_pcd_xyz(pcd_path.to_str().unwrap()) {
+        // let current_pcd = match load_pcd_xyz(pcd_path.to_str().unwrap()) {
+        let current_pcd = match load_pcd_xyzt(pcd_path.to_str().unwrap()) {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Error loading PCD file {}: {}", pcd_path.display(), e);
@@ -111,7 +115,7 @@ fn main() -> Result<()> {
         };
 
         let start_time = std::time::Instant::now();
-        let current_pts = Points::new(current_pcd);
+        // let current_pts = Points::new(current_pcd);
         // let current_pts_arr = points_to_array2(&current_pts);
 
         // // このフレームの開始時刻 = 基準時刻 + (インデックス * 0.1秒)
@@ -124,10 +128,10 @@ fn main() -> Result<()> {
         //     scan_interval
         // );
 
-        let avg_gyro = get_avg_gyro_02(
-            &imu_samples, 
-            i,
-        );
+        // let avg_gyro = get_avg_gyro_02(
+        //     &imu_samples, 
+        //     i,
+        // );
 
         // // デバッグ表示: ちゃんと値が取れているか確認
         // // println!(" - Time: {:.3}s ~ {:.3}s, Gyro: {:.3?}", 
@@ -153,11 +157,32 @@ fn main() -> Result<()> {
         // // 屋内なら 20.0〜30.0m、屋外でも 50.0m 程度で切るのが一般的
         // let current_pts_arr = filter_by_range(&current_pts_arr, 0.1, 20.0);
 
+        // let gyro_bias = calculate_gyro_bias(&imu_samples, 200);
+        // let gyro_bias = calculate_gyro_bias(&imu_samples, &imu_samples[i].);
+
+        // 2. このフレームの時刻範囲を特定 (点群データから直接取得！)
+        // 点群が空でないことを確認
+        if current_pcd.is_empty() { continue; }
+
+        // 点群の中から最小・最大時刻を探す（ソートされていなくても動くように）
+        let min_timestamp = current_pcd.iter()
+            .map(|p| p.timestamp).fold(f64::INFINITY, f64::min);
+        let max_timestamp = current_pcd.iter()
+            .map(|p| p.timestamp).fold(f64::NEG_INFINITY, f64::max);
+
+        // 3. ★IMU軌跡 (Trajectory) の生成
+        // その時刻範囲に対応するIMUデータを積分する
+        let trajectory = build_rotation_trajectory(
+            &imu_samples, 
+            min_timestamp, 
+            max_timestamp, 
+        );
+
         // Preprocess for current points: deskew and range filter
         let mut current_pts_arr = preprocess_point_cloud(
-            &current_pts,
-            avg_gyro.as_ref(),
-            scan_interval,
+            // &current_pts,
+            &current_pcd,
+            &trajectory,
             0.05 as f32,
             20.0 as f32,
         );
@@ -401,44 +426,50 @@ fn main() -> Result<()> {
 // (時刻, その時刻までの累積回転) のペア
 type RotationTrajectory = Vec<(f64, UnitQuaternion<f64>)>;
 
-/// 指定された時間範囲のIMUデータを積分し、回転の軌跡を作成する
+/// 指定範囲のIMUデータを積分し、回転軌跡を作成 (バイアス補正付き)
 fn build_rotation_trajectory(
     imu_samples: &[ImuSample], 
-    frame_start: f64,
-    frame_end: f64
+    start_time: f64,
+    end_time: f64,
 ) -> RotationTrajectory {
     let mut trajectory = Vec::new();
-    // 初期状態は回転なし (Identity)
     let mut current_rotation = UnitQuaternion::identity();
     
-    // 最初のデータポイントを追加
-    trajectory.push((frame_start, current_rotation));
+    // 範囲内のデータのみ抽出
+    // ※ start_time より少し前からデータを取り始めると、先頭の補間精度が上がります
+    let buffer_time = 0.01; // 10ms余裕を持たせる
+    let search_start = start_time - buffer_time;
+    let search_end = end_time + buffer_time;
 
-    // フレームに関係するIMUデータのみ抽出
-    // ※ImuSampleは時間順に並んでいる前提
     let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
-        .filter(|s| s.timestamp_sec >= frame_start && s.timestamp_sec <= frame_end)
+        .filter(|s| s.timestamp_sec >= search_start && s.timestamp_sec <= search_end)
         .collect();
 
-    let mut last_time = frame_start;
+    // 最初の基準点
+    trajectory.push((search_start, current_rotation));
+
+    let mut last_time = search_start;
 
     for sample in relevant_samples {
         let dt = sample.timestamp_sec - last_time;
-        if dt <= 0.0 { continue; }
 
-        // 角速度 (rad/s)
+        if dt <= 1e-9 { 
+            continue; 
+        }
+
+        // バイアスを引いて「真の回転」にする
         let wx = sample.gyro[0] as f64;
         let wy = sample.gyro[1] as f64;
         let wz = sample.gyro[2] as f64;
         let omega = Vector3::new(wx, wy, wz);
 
-        // 微小回転 (AngleAxis)
+        // 微小回転を今の回転に積み上げる
         let angle_axis = omega * dt;
-        
-        // クォータニオンによる回転の更新: R_new = R_old * Delta
-        // (センサー座標系での回転を累積)
         let delta_q = UnitQuaternion::new(angle_axis);
         current_rotation = current_rotation * delta_q;
+
+        // ★修正: 誤差蓄積を防ぐため正規化する
+        current_rotation.renormalize();
 
         trajectory.push((sample.timestamp_sec, current_rotation));
         last_time = sample.timestamp_sec;
@@ -453,13 +484,26 @@ fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64
     if t <= traj.first().unwrap().0 { return traj.first().unwrap().1; }
     if t >= traj.last().unwrap().0 { return traj.last().unwrap().1; }
 
-    // 線形探索 (データ数が20個程度なので十分高速。必要ならbinary_searchに変更)
+    // 線形探索
     for i in 0..traj.len()-1 {
         let (t0, q0) = traj[i];
         let (t1, q1) = traj[i+1];
         
         if t >= t0 && t <= t1 {
-            let ratio = (t - t0) / (t1 - t0);
+            let denom = t1 - t0;
+            // ★修正: 時刻差が小さすぎる場合は補間せず q0 を返す (0除算回避)
+            if denom.abs() < 1e-9 {
+                return q0;
+            }
+
+            let ratio = (t - t0) / denom;
+            
+            // ratioが NaN になっていないか念のためチェック（デバッグ用）
+            if ratio.is_nan() {
+                 eprintln!("Error: NaN ratio detected at t={}, t0={}, t1={}", t, t0, t1);
+                 return q0;
+            }
+            
             return q0.slerp(&q1, ratio);
         }
     }
@@ -467,56 +511,59 @@ fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64
 }
 
 fn preprocess_point_cloud(
-    points: &Points,
-    gyro: Option<&Array1<f32>>,
-    scan_interval: f32,
+    points: &[PointXYZT],
+    trajectory: &RotationTrajectory, // 平均値ではなく軌跡データを受け取る
     min_dist: f32,
     max_dist: f32,
 ) -> Array2<f32> {
-    let n_points = points.points.len();
-
+    let n_points = points.len();
     let mut valid_points_flat = Vec::with_capacity(n_points * 3);
 
-    // Angular velocities
-    let (wx, wy, wz) = match gyro {
-        Some(g) => (g[0] as f32, g[1] as f32, g[2] as f32),
-        None => (0.0, 0.0, 0.0),
-    };
+    // 時間オフセットの調整用 (必要に応じて変更)
+    // LiDarのtimestampとIMUのtimestampのズレをここで吸収
+    let time_offset = 0.0; 
 
-    for (i, p) in points.points.iter().enumerate() {
-        let mut x = p.x as f32;
-        let mut y = p.y as f32;
-        let mut z = p.z as f32;
+    for p in points {
+        let x = p.x as f32;
+        let y = p.y as f32;
+        let z = p.z as f32;
 
-        // Filter by range
+        if x.is_nan() || y.is_nan() || z.is_nan() {
+            println!("Warning: Found NaN point, skipping.");
+            continue;
+        }
+
+        // 1. 距離フィルタ
         let dist_sq = x * x + y * y + z * z;
         if dist_sq < min_dist * min_dist || dist_sq > max_dist * max_dist {
             continue;
         }
 
-        // Deskewing
         // 2. 歪み補正 (Deskewing)
-        // IMUデータが存在し、かつ角速度がほぼゼロでない場合のみ計算
-        if gyro.is_some() && (wx.abs() > 1e-6 || wy.abs() > 1e-6 || wz.abs() > 1e-6) {
-            let ratio = i as f32 / n_points as f32;
-            let dt = ratio * scan_interval as f32;
+        // 点群が持っている正確な時刻を使用
+        let point_time = p.timestamp + time_offset;
 
-            // ロドリゲスの回転公式の簡易版（微小回転近似）
-            // R ≈ I + [ω]_x * dt
-            // これにより sin/cos の計算コストを削減できる（精度が必要なら正規のロドリゲスを使用）
-            let dx = (wy * z - wz * y) * dt;
-            let dy = (wz * x - wx * z) * dt;
-            let dz = (wx * y - wy * x) * dt;
+        // その時刻の回転姿勢を取得 (SLERP補間)
+        let rotation = get_rotation_at_time(trajectory, point_time);
 
-            x += dx;
-            y += dy;
-            z += dz;
+        // 座標変換 (逆回転させて開始時点の姿勢に戻す)
+        // ※ nalgebraのVector3を使用
+        let p_vec = Vector3::new(x as f64, y as f64, z as f64);
+        
+        // Livoxの場合、スキャン中に動いた分をキャンセルしたいので inverse() をかける
+        let corrected = rotation.inverse() * p_vec;
+
+        // ★修正: 補正後の値が NaN になっていないかチェック
+        if corrected.x.is_nan() || corrected.y.is_nan() || corrected.z.is_nan() {
+            eprintln!("Warning: Deskew resulted in NaN for point ({}, {}, {}), skipping.", x, y, z);
+            // Deskew計算でNaNが出た場合はスキップ
+            continue;
         }
 
         // 3. データの格納
-        valid_points_flat.push(x);
-        valid_points_flat.push(y);
-        valid_points_flat.push(z);
+        valid_points_flat.push(corrected.x as f32);
+        valid_points_flat.push(corrected.y as f32);
+        valid_points_flat.push(corrected.z as f32);
     }
 
     let n_valid = valid_points_flat.len() / 3;
@@ -809,6 +856,20 @@ fn points_to_array2(
     arr
 }
 
+fn point_xyzt_to_array2(
+    points: &[PointXYZT]
+) -> Array2<f32> {
+    let n = points.len();
+    let mut arr = Array2::<f32>::zeros((n, 3));
+    for (i, p) in points.iter().enumerate() {
+        arr[[i, 0]] = p.x as f32;
+        arr[[i, 1]] = p.y as f32;
+        arr[[i, 2]] = p.z as f32;
+    }
+
+    arr
+}
+
 fn find_closest_pairs_kdtree(
     source_pts: &Array2<f32>,      // サンプリングされた source 点群
     target_pts: &Array2<f32>,      // target 全体 (インデックスから点を引くため)
@@ -818,7 +879,7 @@ fn find_closest_pairs_kdtree(
     let n = source_pts.nrows();
 
     let results: Vec<(usize, f32)> = (0..n).into_par_iter()
-        .map(|i| {
+        .filter_map(|i| {
             let source_row = source_pts.row(i);
             let query_point = [source_row[0], source_row[1], source_row[2]];
 
@@ -828,7 +889,7 @@ fn find_closest_pairs_kdtree(
             let neighbor = neighbors[0];
             let dist_sq = neighbor.distance;
             let target_index = neighbor.item as usize;
-            (target_index, dist_sq)
+            Some((target_index, dist_sq))
         })
         .collect();
 
@@ -845,6 +906,7 @@ fn find_closest_pairs_kdtree(
 struct LivoxImuBatch {
     timestamp: u64, // ナノ秒と仮定 (例: 484350964530)
     angular_velocity: Vec<[f32; 3]>,
+    sample_count: usize,
     // sample_count は Vecのlen()でわかるので無視してもOK
 }
 
@@ -853,6 +915,15 @@ struct LivoxImuBatch {
 struct ImuSample {
     timestamp_sec: f64, // 計算しやすいように秒単位(f64)に変換して持つ
     gyro: Array1<f32>,
+    sample_count: usize,
+}
+
+fn load_imu_json(path: &str) -> Result<Vec<LivoxImuBatch>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let batches: Vec<LivoxImuBatch> = serde_json::from_reader(reader)?;
+
+    Ok(batches)
 }
 
 /// JSONファイルを読み込み、時間順に並んだサンプルのリストを返す
@@ -876,6 +947,7 @@ fn load_and_flatten_imu_json(path: &str) -> Result<Vec<ImuSample>> {
             samples.push(ImuSample {
                 timestamp_sec: current_time,
                 gyro: arr1(&[gyro[0] as f32, gyro[1] as f32, gyro[2] as f32]),
+                sample_count: 1,
             });
         }
     }
@@ -884,6 +956,19 @@ fn load_and_flatten_imu_json(path: &str) -> Result<Vec<ImuSample>> {
     samples.sort_by(|a, b| a.timestamp_sec.partial_cmp(&b.timestamp_sec).unwrap());
 
     Ok(samples)
+}
+
+/// 最初のN個のIMUデータからジャイロバイアス（静止時のオフセット）を計算
+fn calculate_gyro_bias(samples: &[ImuSample], count: usize) -> Array1<f32> {
+    let mut sum = Array1::<f32>::zeros(3);
+    let n = std::cmp::min(samples.len(), count);
+    
+    if n == 0 { return sum; }
+
+    for i in 0..n {
+        sum = sum + &samples[i].gyro;
+    }
+    sum / (n as f32)
 }
 
 fn get_avg_gyro_02(
