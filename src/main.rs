@@ -1,9 +1,8 @@
 use std::{collections::VecDeque, fs::File, io::BufReader, usize};
 
 use anyhow::{Result, Context};
-use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZNormal, PointXYZT, Points, load_pcd_xyz, load_pcd_xyzt, save_pcd, save_pcd_with_normals}, voxelization::voxel_downsample_array2};
-use kdtree::{KdTree, distance::squared_euclidean};
-use nalgebra::{Matrix3, Matrix6, Rotation3, SymmetricEigen, UnitQuaternion, Vector3, Vector6};
+use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZT, Points, load_pcd_xyzt}, voxelization::voxel_downsample_array2};
+use nalgebra::{Matrix3, Rotation3, SymmetricEigen, UnitQuaternion, Vector3};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
@@ -26,7 +25,6 @@ const TOLERANCE: f32 = 0.050;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.2;
 
 fn main() -> Result<()> {
-    let scan_interval: f32 = 0.1; // 10Hz = 0.1秒間隔
     let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-07";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
@@ -36,9 +34,6 @@ fn main() -> Result<()> {
         }
     };
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
-    // for path in &pcd_paths {
-    //     println!(" - {}", path.display());
-    // }
 
     println!("Loading IMU JSON...");
     let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-07/imu_data.json")
@@ -50,8 +45,6 @@ fn main() -> Result<()> {
         return Err(anyhow::anyhow!("IMU data is empty"));
     }
     
-    // ★基準時刻の設定: IMUデータの最初の時間をスタート地点(T0)とする
-    // もし「PCDの方が5秒遅れて始まる」等のオフセットがある場合はここで調整してください
     let base_timestamp = imu_samples[0].timestamp_sec;
     println!("Base timestamp set to: {:.3}", base_timestamp);
 
@@ -64,13 +57,11 @@ fn main() -> Result<()> {
         }
     };
 
-    // let initial_pts = Points::new(initial_pcd);
-    // let initial_pts_arr = points_to_array2(&initial_pts);
     let initial_pts_arr = point_xyzt_to_array2(&initial_pcd);
     let mut target_pts_arr = initial_pts_arr.clone();
 
     let mut current_global_pose = Array2::<f32>::eye(4);
-    let mut last_delta_transform = Array2::<f32>::eye(4); // 直近の速度（移動量）を保持
+    let mut last_delta_transform = Array2::<f32>::eye(4);
 
     // Local map queue
     let mut local_map_queue: VecDeque<Array2<f32>> = VecDeque::new();
@@ -88,22 +79,10 @@ fn main() -> Result<()> {
     let mut total_normals_time = std::time::Duration::new(0, 0);
     let mut total_icp_time = std::time::Duration::new(0, 0);
     let mut processed_frame_count: u32 = 0;
-
-    // 初期フレームの法線を計算してキューに入れる処理
-    {
-        // 初期フレーム用のKdTreeと法線計算
-        let mut kdtree_init: KdTree<f32, usize, [f32; 3]> = KdTree::new(3);
-        // ... (add points to kdtree) ...
-        for (i, r) in initial_pts_arr.rows().into_iter().enumerate() {
-             let point: [f32; 3] = [r[0], r[1], r[2]];
-             kdtree_init.add(point, i).unwrap();
-        }
-        let viewpoint = arr1(&[0.0, 0.0, 0.0]);
-        // let initial_normals = calculate_normals(&initial_pts_arr, &kdtree_init, &viewpoint)?;
-        
-        local_map_queue.push_back(initial_pts_arr.clone());
-        global_map_accumulator.push(initial_pts_arr.clone());
-    }
+    
+    local_map_queue.push_back(initial_pts_arr.clone());
+    global_map_accumulator.push(initial_pts_arr.clone());
+    
 
     for (i, pcd_path) in pcd_paths.iter().enumerate() {
         println!("PCD File {}: {}", i, pcd_path.display());
@@ -121,56 +100,10 @@ fn main() -> Result<()> {
             }
         };
 
-        let start_time = std::time::Instant::now();
-        // let current_pts = Points::new(current_pcd);
-        // let current_pts_arr = points_to_array2(&current_pts);
-
-        // // このフレームの開始時刻 = 基準時刻 + (インデックス * 0.1秒)
-        // let current_frame_start_time = base_timestamp + (i as f64 * scan_interval);
-
-        // // 対応するIMUデータの平均角速度を取得
-        // let avg_gyro = get_avg_gyro(
-        //     &imu_samples, 
-        //     current_frame_start_time, 
-        //     scan_interval
-        // );
-
-        // let avg_gyro = get_avg_gyro_02(
-        //     &imu_samples, 
-        //     i,
-        // );
-
-        // // デバッグ表示: ちゃんと値が取れているか確認
-        // // println!(" - Time: {:.3}s ~ {:.3}s, Gyro: {:.3?}", 
-        // //     current_frame_start_time, 
-        // //     current_frame_start_time + scan_interval, 
-        // //     avg_gyro
-        // // );
-
-        // // 歪み補正 (Deskewing) 実行
-        // let mut current_pts_arr = match avg_gyro {
-        //     Some(gyro) => {
-        //         deskew_point_cloud(&current_pts_arr, &gyro, scan_interval)
-        //     }
-        //     None => {
-        //         eprintln!("Warning: No IMU data for frame {} time window [{:.3}, {:.3}), using original points",
-        //             i, current_frame_start_time, current_frame_start_time + scan_interval);
-        //         current_pts_arr  // Use original points if no IMU data
-        //     }
-        // };
-
-        // // 2. ★ここで距離フィルタを実行★
-        // // 例: 0.5m 以内(自分)と、30m 以遠(ノイズ)をカット
-        // // 屋内なら 20.0〜30.0m、屋外でも 50.0m 程度で切るのが一般的
-        // let current_pts_arr = filter_by_range(&current_pts_arr, 0.1, 20.0);
-
-        // let gyro_bias = calculate_gyro_bias(&imu_samples, 200);
-        // let gyro_bias = calculate_gyro_bias(&imu_samples, &imu_samples[i].);
-
-        // 2. このフレームの時刻範囲を特定 (点群データから直接取得！)
-        // 点群が空でないことを確認
         if current_pcd.is_empty() { continue; }
 
+        let start_time = std::time::Instant::now();
+        
         // 点群の中から最小・最大時刻を探す（ソートされていなくても動くように）
         let min_timestamp = current_pcd.iter()
             .map(|p| p.timestamp).fold(f64::INFINITY, f64::min);
@@ -193,18 +126,6 @@ fn main() -> Result<()> {
             0.05 as f32,
             20.0 as f32,
         );
-
-        // // 歪み補正 (Deskewing) 実行
-        // let mut current_pts_arr = match avg_gyro {
-        //     Some(gyro) => {
-        //         deskew_point_cloud(&current_pts_arr, &gyro, scan_interval)
-        //     }
-        //     None => {
-        //         eprintln!("Warning: No IMU data for frame {} time window, using original points",
-        //             i);
-        //         current_pts_arr  // Use original points if no IMU data
-        //     }
-        // };
         let elapsed_preprocess = start_time.elapsed();
 
         current_pts_arr = voxel_downsample_array2(&current_pts_arr, VOXEL_SIZE);
@@ -214,7 +135,7 @@ fn main() -> Result<()> {
             .map(|p| p.view())
             .collect();
         target_pts_arr = ndarray::concatenate(
-            Axis(0),  // 縦方向（行方向）に結合
+            Axis(0),
             &local_map_views
         ).context("Failed to concatenate arrays for local map")?;
 
@@ -222,8 +143,6 @@ fn main() -> Result<()> {
 
         // Create KdTree for target points
         println!("Building k-d tree for target points...");
-        // let n_dims_target = target_pts_arr.ncols();
-        // let mut kdtree_target: KdTree<f64, usize, [f64; 3]> = KdTree::new(3);
         let target_points: Vec<[f32; 3]> = target_pts_arr.outer_iter()
             .map(|row| [row[0], row[1], row[2]])
             .collect();
@@ -236,14 +155,12 @@ fn main() -> Result<()> {
         let tx = current_global_pose[[0, 3]];
         let ty = current_global_pose[[1, 3]];
         let tz = current_global_pose[[2, 3]];
+
         let viewpoint = arr1(&[tx, ty, tz]); // ローカル座標系での視点
-        // let current_normals_arr = calculate_normals(&current_pts_arr, &kdtree_current, &viewpoint)?;
-        // let target_normals = calculate_normals(&target_pts_arr, &kdtree_target, &viewpoint)?;
         let target_normals = calculate_normals_optimized(&target_pts_arr, &kdtree_target, &viewpoint)?;
         let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
 
         let predicted_pose = last_delta_transform.dot(&current_global_pose);
-        // let mut total_transform = current_global_pose.clone();
         // ICPの探索開始位置を予測位置にセット
         let mut total_transform = predicted_pose;
 
@@ -258,12 +175,9 @@ fn main() -> Result<()> {
         let start_icp_time = std::time::Instant::now();
         for i in 0..MAX_ITERATIONS {
             // --- 2b. "現在" のソース点群を計算 ---
-            // (N, 4) = (N, 4) .dot (4, 4)
             let current_transformed_homogeneous = original_source_pts.dot(&total_transform.t());
-            // (N, 3) の座標に戻す
             let current_source_pts_arr = current_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
-            // (サンプリングは current_source_pts_arr から行う - 変更なし)
             let (sampled_source_pts, _) = 
                 if source_points_num <= SAMPLE_SIZE {
                     (current_source_pts_arr.clone(), source_indices.clone())
@@ -276,11 +190,11 @@ fn main() -> Result<()> {
                     (current_source_pts_arr.select(Axis(0), &indices), indices)
                 };
 
-            // --- 2c. `find_closest_pairs_kdtree` の呼び出し (戻り値が3つに) ---
+            // --- 2c. `find_closest_pairs_kdtree` の呼び出し ---
             let (matched_target_pts, matched_target_indices, distance_sq) = 
                 find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree_target);
 
-            // (Trimming (インライア選択) - 変更なし)
+            // インライア選択
             let mut dist_with_indices: Vec<(f32, usize)> = distance_sq.iter()
                 .cloned()
                 .enumerate()
@@ -293,21 +207,20 @@ fn main() -> Result<()> {
                 .map(|&(_dist, idx)| idx)
                 .collect();
             
-            // (インライアの点群を取得 - 変更なし)
+            // インライアの点群を取得
             let inlier_source_pts = sampled_source_pts.select(Axis(0), &inlier_indices);
             let inlier_target_pts = matched_target_pts.select(Axis(0), &inlier_indices);
 
-            // --- 2d. インライアの "法線" を取得 (★重要★) ---
+            // --- 2d. インライアの "法線" を取得 ---
             // `inlier_indices` を使って `matched_target_indices` から "グローバルインデックス" を取得
             let inlier_target_global_indices: Vec<usize> = inlier_indices.iter()
-                .map(|&idx_n| matched_target_indices[idx_n]) // idx_n は 0..N_sample のインデックス
+                .map(|&idx_n| matched_target_indices[idx_n])
                 .collect();
             // グローバルインデックスを使って `target_normals` から法線を抽出
             let inlier_target_normals = target_normals.select(Axis(0), &inlier_target_global_indices);
 
-            // --- 2e. "Point-to-Plane" の計算を呼び出し ---
+            // --- 2e. "Point-to-Plane" ---
             let delta_transform = match calculate_transformation_pt_to_plane(
-            // let delta_transform = match calculate_transformation_pt_to_plane_optimized(
                 &inlier_source_pts,
                 &inlier_target_pts,
                 &inlier_target_normals
@@ -315,7 +228,7 @@ fn main() -> Result<()> {
                 Ok(tf) => tf,
                 Err(e) => {
                     eprintln!("Warning: Failed to solve transformation, skipping iteration: {}", e);
-                    continue; // このイテレーションをスキップ
+                    continue;
                 }
             };
 
@@ -323,7 +236,7 @@ fn main() -> Result<()> {
             // T_k+1 = DeltaT * T_k
             total_transform = delta_transform.dot(&total_transform);
             
-            // --- 2g. エラー計算 (Point-to-Plane 誤差を推奨) ---
+            // --- 2g. エラー計算 (Point-to-Plane 誤差) ---
             let current_error = calculate_mean_pt_to_plane_error(
                 &inlier_source_pts, 
                 &inlier_target_pts, 
@@ -345,7 +258,6 @@ fn main() -> Result<()> {
                 println!("Final mean pt-to-plane error: {}", current_error);
                 break;
             }
-            // println!("Final mean pt-to-plane error: {}", current_error);
         }
         let elapsed_icp = start_icp_time.elapsed();
 
@@ -363,29 +275,21 @@ fn main() -> Result<()> {
         last_delta_transform = new_delta;
         current_global_pose = total_transform.clone();
 
-        // ★修正: 「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
+        //「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
         const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
         const ANGLE_THRESHOLD: f32 = 0.035; // 約0.5度以上回ったら
 
-        // if i < 10 || rotation_diff < ANGLE_THRESHOLD || translation_diff > MOVE_THRESHOLD {
-        // if i < 10 || rotation_diff < ANGLE_THRESHOLD {
         if i < 10 || translation_diff > MOVE_THRESHOLD {
             println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
             
-            // if translation_diff > MOVE_THRESHOLD {
             if rotation_diff < ANGLE_THRESHOLD {
                 // 1. 点群の変換
                 let cloned_source_pts = original_source_pts.clone();
                 let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
                 let aligned_pts = final_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
-                // 2. 法線の回転
-                let rotation_matrix = total_transform.slice(s![0..3, 0..3]);
-                // let aligned_normals = current_normals_arr.dot(&rotation_matrix.t());
-
-                // 3. ローカルマップに追加 (毎フレームに近い頻度で行われる)
-                // local_map_queue.push_back(aligned_pts.clone());
+                // 2. ローカルマップに追加
                 if i % 2 == 0 {
                     local_map_queue.push_back(aligned_pts.clone());
                 }
@@ -394,8 +298,7 @@ fn main() -> Result<()> {
                     local_map_queue.pop_front();
                 }
 
-                // 4. グローバルマップへの保存 (こちらは容量節約のため、たまにでOK)
-                // ここは i % 5 のままで良いですし、上記と同じ移動判定を使っても良いです
+                // 3. グローバルマップへの保存
                 if i % 5 == 0 {
                     global_map_accumulator.push(aligned_pts.to_owned());
                 }
@@ -403,15 +306,15 @@ fn main() -> Result<()> {
         }
 
         // Debug
-        if i % 20 == 0 {
-            // 最後に global_map_accumulator を全部結合して保存
-            let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-            let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
-            let final_map_points = array2_to_points(&voxelized_final_map);
-            let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
-            final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
-                .context("Failed to save debug merged PCD file")?;
-        }
+        // if i % 20 == 0 {
+        //     // 最後に global_map_accumulator を全部結合して保存
+        //     let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+        //     let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+        //     let final_map_points = array2_to_points(&voxelized_final_map);
+        //     let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
+        //     final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
+        //         .context("Failed to save debug merged PCD file")?;
+        // }
 
         println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, normals time: {:.3?}, ICP time: {:.3?}",
             elapsed_preprocess,
@@ -471,7 +374,6 @@ fn build_rotation_trajectory(
     let mut current_rotation = UnitQuaternion::identity();
     
     // 範囲内のデータのみ抽出
-    // ※ start_time より少し前からデータを取り始めると、先頭の補間精度が上がります
     let buffer_time = 0.01; // 10ms余裕を持たせる
     let search_start = start_time - buffer_time;
     let search_end = end_time + buffer_time;
@@ -526,7 +428,6 @@ fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64
         
         if t >= t0 && t <= t1 {
             let denom = t1 - t0;
-            // ★修正: 時刻差が小さすぎる場合は補間せず q0 を返す (0除算回避)
             if denom.abs() < 1e-9 {
                 return q0;
             }
@@ -534,10 +435,10 @@ fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64
             let ratio = (t - t0) / denom;
             
             // ratioが NaN になっていないか念のためチェック（デバッグ用）
-            if ratio.is_nan() {
-                 eprintln!("Error: NaN ratio detected at t={}, t0={}, t1={}", t, t0, t1);
-                 return q0;
-            }
+            // if ratio.is_nan() {
+            //      eprintln!("Error: NaN ratio detected at t={}, t0={}, t1={}", t, t0, t1);
+            //      return q0;
+            // }
             
             return q0.slerp(&q1, ratio);
         }
@@ -547,15 +448,14 @@ fn get_rotation_at_time(traj: &RotationTrajectory, t: f64) -> UnitQuaternion<f64
 
 fn preprocess_point_cloud(
     points: &[PointXYZT],
-    trajectory: &RotationTrajectory, // 平均値ではなく軌跡データを受け取る
+    trajectory: &RotationTrajectory,
     min_dist: f32,
     max_dist: f32,
 ) -> Array2<f32> {
     let n_points = points.len();
     let mut valid_points_flat = Vec::with_capacity(n_points * 3);
 
-    // 時間オフセットの調整用 (必要に応じて変更)
-    // LiDarのtimestampとIMUのtimestampのズレをここで吸収
+    // 時間オフセットの調整用
     let time_offset = 0.0; 
 
     for p in points {
@@ -563,10 +463,10 @@ fn preprocess_point_cloud(
         let y = p.y as f32;
         let z = p.z as f32;
 
-        if x.is_nan() || y.is_nan() || z.is_nan() {
-            println!("Warning: Found NaN point, skipping.");
-            continue;
-        }
+        // if x.is_nan() || y.is_nan() || z.is_nan() {
+        //     println!("Warning: Found NaN point, skipping.");
+        //     continue;
+        // }
 
         // 1. 距離フィルタ
         let dist_sq = x * x + y * y + z * z;
@@ -582,10 +482,9 @@ fn preprocess_point_cloud(
         let rotation = get_rotation_at_time(trajectory, point_time);
 
         // 座標変換 (逆回転させて開始時点の姿勢に戻す)
-        // ※ nalgebraのVector3を使用
         let p_vec = Vector3::new(x as f64, y as f64, z as f64);
         
-        // Livoxの場合、スキャン中に動いた分をキャンセルしたいので inverse() をかける
+        // Livoxの場合、スキャン中に動いた分をキャンセル
         let corrected = rotation.inverse() * p_vec;
 
         // ★修正: 補正後の値が NaN になっていないかチェック
@@ -649,16 +548,13 @@ fn calculate_transformation_pt_to_plane(
     // b (誤差) は N x 1 のベクトル
     let mut b = Array1::<f32>::zeros(n_inliers);
 
-    // azip! を使って並列に A と b を構築
     azip!((
         mut a_row in a.axis_iter_mut(Axis(0)),
         b_val in &mut b,
         p_s in inlier_source_pts.axis_iter(Axis(0)), // p'_i (transformed source)
         p_t in inlier_target_pts.axis_iter(Axis(0)), // x_i (target)
         n_t in inlier_target_normals.axis_iter(Axis(0)) // n_i (target normal)
-    ) {
-        // --- ここがPoint-to-Planeの核心 ---
-        
+    ) { 
         // p'_i x n_i (クロス積)
         // Manual cross product: p'_i x n_i
         let cross_x = p_s[1] * n_t[2] - p_s[2] * n_t[1];
@@ -745,12 +641,8 @@ fn calculate_transformation_pt_to_plane(
             [k_x*k_z*v_th - k_y*s_th, k_y*k_z*v_th + k_x*s_th, k_z*k_z*v_th + c_th]
         ];
     }
-
-    // 2. 並進ベクトル t (3x1) を計算 (これは回転の影響も受ける)
-    // (ここでは簡略化のため、並進はそのまま t = [tx, ty, tz] とします。
-    //  厳密な指数写像では V * t も計算しますが、ICPではこの形でも十分に収束します)
     
-    // 3. 厳密な 4x4 剛体変換行列を構築
+    // 2. 厳密な 4x4 剛体変換行列を構築
     let delta_t = array![
         [r[[0, 0]], r[[0, 1]], r[[0, 2]], tx],
         [r[[1, 0]], r[[1, 1]], r[[1, 2]], ty],
@@ -768,21 +660,14 @@ fn calculate_normals_optimized(
 ) -> Result<Array2<f32>> {
     let n_points = target_pts.nrows();
     
-    // 結果を格納する配列 (スレッドセーフに書き込むため UnsafeCell あるいは Vec で collect する)
-    // Rayonの map/collect を使うのが最も安全で高速です
     let normals_vec: Vec<Vec<f32>> = (0..n_points).into_par_iter().map(|i| {
         // 1. Query Point の取得
-        // ndarrayの行アクセスは少し遅いので、生ポインタ的アクセスかgetを使う
         let qx = target_pts[[i, 0]];
         let qy = target_pts[[i, 1]];
         let qz = target_pts[[i, 2]];
         let query_point = [qx, qy, qz];
 
         // 2. 近傍探索
-        // let neighbors = match kdtree.nearest(&query_point, K_NEIGHBORS, &squared_euclidean) {
-        //     Ok(n) => n,
-        //     Err(_) => return vec![0.0, 0.0, 0.0], // エラー時はゼロ法線
-        // };
         let k = std::num::NonZeroUsize::new(K_NEIGHBORS).unwrap();
         let neighbors = kdtree.nearest_n::<kiddo::SquaredEuclidean>(&query_point, k);
 
@@ -790,10 +675,7 @@ fn calculate_normals_optimized(
             return vec![0.0, 0.0, 0.0];
         }
 
-        // 3. 共分散行列の計算 (メモリ確保なし版)
-        // Cov = E[XX^T] - E[X]E[X]^T を利用して1パスで計算する
-        // または、重心を求めてから差分を累積する2パスでも、配列確保よりは速い
-        
+        // 3. 共分散行列の計算     
         // --- パス1: 重心 (Centroid) 計算 ---
         let mut sum = Vector3::zeros();
         for neighbor in &neighbors {
@@ -807,7 +689,6 @@ fn calculate_normals_optimized(
         let centroid = sum / k_f32;
 
         // --- パス2: 共分散行列 (Covariance Matrix) 計算 ---
-        // nalgebra の Matrix3 を使う (スタック確保なので爆速)
         let mut cov = Matrix3::zeros();
         for neighbor in &neighbors {
             let idx = neighbor.item as usize;
@@ -816,17 +697,12 @@ fn calculate_normals_optimized(
             let nz = target_pts[[idx, 2]];
             
             let d = Vector3::new(nx, ny, nz) - centroid;
-            // 外積 (d * d^T) を加算
             cov += d * d.transpose();
         }
-        // 通常は N-1 で割るが、固有ベクトルの向きには影響しないので省略可
-        // cov /= k_f64; 
 
         // 4. 固有値分解 (Symmetric Eigen decomposition)
-        // 共分散行列は対称行列なので、SVDより高速な SymmetricEigen を使用
         let eigen = SymmetricEigen::new(cov);
         
-        // nalgebraのeigenvaluesはVector3なのでイテレータで回して探す
         let (min_idx, _) = eigen.eigenvalues.iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
@@ -835,7 +711,7 @@ fn calculate_normals_optimized(
         // そのインデックスに対応する固有ベクトルを取得
         let mut normal = eigen.eigenvectors.column(min_idx).into_owned();
 
-        // 法線の正規化（念のため）
+        // 法線の正規化
         let norm = normal.norm();
         if norm < 1e-12 {
             return vec![0.0, 0.0, 0.0];
@@ -851,7 +727,6 @@ fn calculate_normals_optimized(
         vec![normal.x, normal.y, normal.z]
     }).collect();
 
-    // Vec<Vec<f64>> -> Array2<f64> への変換 (コストは軽微)
     let mut normals_arr = Array2::<f32>::zeros((n_points, 3));
     for (i, normal) in normals_vec.into_iter().enumerate() {
         normals_arr[[i, 0]] = normal[0];
@@ -907,7 +782,7 @@ fn point_xyzt_to_array2(
 
 fn find_closest_pairs_kdtree(
     source_pts: &Array2<f32>,      // サンプリングされた source 点群
-    target_pts: &Array2<f32>,      // target 全体 (インデックスから点を引くため)
+    target_pts: &Array2<f32>,
     kdtree: &kiddo::ImmutableKdTree<f32, 3>
 ) -> (Array2<f32>, Vec<usize>, Vec<f32>) {
     
@@ -930,8 +805,6 @@ fn find_closest_pairs_kdtree(
 
     let (closest_indices, distance_sq): (Vec<usize>, Vec<f32>) = results.into_iter().unzip();
     
-    // 見つかったインデックスのリストを使って、
-    // target_pts から対応する点を一括で抽出する
     let matched_target_pts = target_pts.select(Axis(0), &closest_indices);
     (matched_target_pts, closest_indices, distance_sq)
 }
@@ -951,14 +824,6 @@ struct ImuSample {
     timestamp_sec: f64, // 計算しやすいように秒単位(f64)に変換して持つ
     gyro: Array1<f32>,
     sample_count: usize,
-}
-
-fn load_imu_json(path: &str) -> Result<Vec<LivoxImuBatch>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let batches: Vec<LivoxImuBatch> = serde_json::from_reader(reader)?;
-
-    Ok(batches)
 }
 
 /// JSONファイルを読み込み、時間順に並んだサンプルのリストを返す
@@ -991,86 +856,4 @@ fn load_and_flatten_imu_json(path: &str) -> Result<Vec<ImuSample>> {
     samples.sort_by(|a, b| a.timestamp_sec.partial_cmp(&b.timestamp_sec).unwrap());
 
     Ok(samples)
-}
-
-/// 最初のN個のIMUデータからジャイロバイアス（静止時のオフセット）を計算
-fn calculate_gyro_bias(samples: &[ImuSample], count: usize) -> Array1<f32> {
-    let mut sum = Array1::<f32>::zeros(3);
-    let n = std::cmp::min(samples.len(), count);
-    
-    if n == 0 { return sum; }
-
-    for i in 0..n {
-        sum = sum + &samples[i].gyro;
-    }
-    sum / (n as f32)
-}
-
-fn get_avg_gyro_02(
-    all_samples: &[ImuSample], 
-    frame_count: usize,
-) -> Option<Array1<f32>> {
-    // 1フレーム(100ms)あたりのIMUサンプル数
-    // 200Hzの場合: 0.1s / 0.005s = 20個
-    const SAMPLES_PER_FRAME: usize = 20;
-
-    let start_index = frame_count * SAMPLES_PER_FRAME;
-    let end_index = start_index + SAMPLES_PER_FRAME;
-
-    // データ範囲外チェック
-    if start_index >= all_samples.len() {
-        return None;
-    }
-
-    // 配列の末尾を超えないように調整
-    let actual_end_index = std::cmp::min(end_index, all_samples.len());
-    let target_samples = &all_samples[start_index..actual_end_index];
-
-    if target_samples.is_empty() {
-        return None;
-    }
-
-    // 合計を計算
-    let mut sum = Array1::<f32>::zeros(3);
-    for sample in target_samples {
-        sum = sum + &sample.gyro;
-    }
-
-    // 平均を返す
-    Some(sum / (target_samples.len() as f32))
-}
-
-// --- ヘルパー3: 歪み補正 (Deskewing) ---
-fn deskew_point_cloud(
-    points: &Array2<f32>,
-    angular_velocity: &Array1<f32>,
-    scan_duration: f32,
-) -> Array2<f32> {
-    let n_points = points.nrows();
-    let mut corrected_points = Array2::<f32>::zeros((n_points, 3));
-    
-    // nalgebraのVector3に変換
-    let omega = Vector3::new(angular_velocity[0], angular_velocity[1], angular_velocity[2]);
-
-    for i in 0..n_points {
-        // 点群が時間順に並んでいる前提で、リニアに時刻を推定
-        let ratio = i as f32 / n_points as f32;
-        let dt = ratio * scan_duration;
-
-        // 回転ベクトル = 角速度 * 経過時間
-        // ※もし補正方向が逆なら -omega * dt にする
-        let angle_axis = omega * dt;
-        
-        // 回転行列
-        let rotation = Rotation3::new(angle_axis);
-        
-        // 座標変換
-        let p = Vector3::new(points[[i, 0]], points[[i, 1]], points[[i, 2]]);
-        let p_corrected = rotation * p;
-
-        corrected_points[[i, 0]] = p_corrected.x;
-        corrected_points[[i, 1]] = p_corrected.y;
-        corrected_points[[i, 2]] = p_corrected.z;
-    }
-    corrected_points
 }

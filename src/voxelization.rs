@@ -26,7 +26,7 @@ impl VoxelStat {
 #[inline]
 fn morton3d(ix: u32, iy: u32, iz: u32) -> u64 {
     fn part1by2(n: u32) -> u64 {
-        // 21bit制限を超えないように念のためマスク（元のコード通り）
+        // 21bit制限を超えないように念のためマスク
         let mut x = n as u64 & 0x1fffff;
         x = (x | x << 32) & 0x1f00000000ffff;
         x = (x | x << 16) & 0x1f0000ff0000ff;
@@ -45,7 +45,6 @@ pub fn voxel_downsample_array2(points: &Array2<f32>, voxel_size: f32) -> Array2<
     }
 
     // 1. 最小値・最大値の計算 (並列化で高速化)
-    // ndarrayのaxis_iterを使うと安全
     let (min_corner, max_corner) = points.axis_iter(Axis(0))
         .into_par_iter()
         .fold(
@@ -69,7 +68,6 @@ pub fn voxel_downsample_array2(points: &Array2<f32>, voxel_size: f32) -> Array2<
         );
 
     // 安全対策: グリッド数が21bit(約200万)を超えないかチェック
-    // 超える場合はボクセルサイズを強制調整するか、エラーにするか、あきらめる
     let inv = 1.0 / voxel_size;
     let max_idx_x = ((max_corner[0] - min_corner[0]) * inv) as u64;
     let max_idx_y = ((max_corner[1] - min_corner[1]) * inv) as u64;
@@ -77,7 +75,6 @@ pub fn voxel_downsample_array2(points: &Array2<f32>, voxel_size: f32) -> Array2<
     
     if max_idx_x > 0x1fffff || max_idx_y > 0x1fffff || max_idx_z > 0x1fffff {
         eprintln!("Warning: Point cloud extent exceeds Morton code limit (21-bit). Results may collide.");
-        // 実戦ではここで return Err したり、voxel_size を大きくしたりする
     }
 
     // 2. Map-Reduce パターンによるボクセル集計
@@ -105,7 +102,7 @@ pub fn voxel_downsample_array2(points: &Array2<f32>, voxel_size: f32) -> Array2<
             }
         )
         .reduce(
-            FastMap::default, // マージ処理
+            FastMap::default,
             |mut map_a, map_b| {
                 for (k, v) in map_b {
                     map_a.entry(k).or_default().merge(&v);
