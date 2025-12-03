@@ -82,6 +82,13 @@ fn main() -> Result<()> {
 
     let mut final_errors: f32 = 0.0;
 
+    // Time accumulators
+    let mut total_preprocess_time = std::time::Duration::new(0, 0);
+    let mut total_kdtree_time = std::time::Duration::new(0, 0);
+    let mut total_normals_time = std::time::Duration::new(0, 0);
+    let mut total_icp_time = std::time::Duration::new(0, 0);
+    let mut processed_frame_count: u32 = 0;
+
     // 初期フレームの法線を計算してキューに入れる処理
     {
         // 初期フレーム用のKdTreeと法線計算
@@ -412,6 +419,25 @@ fn main() -> Result<()> {
             elapsed_normals,
             elapsed_icp
         );
+
+        total_preprocess_time += elapsed_preprocess;
+        total_kdtree_time += elapsed_kdtree;
+        total_normals_time += elapsed_normals;
+        total_icp_time += elapsed_icp;
+        processed_frame_count += 1;
+    }
+
+    if processed_frame_count > 0 {
+        let avg_preprocess = total_preprocess_time / processed_frame_count;
+        let avg_kdtree = total_kdtree_time / processed_frame_count;
+        let avg_normals = total_normals_time / processed_frame_count;
+        let avg_icp = total_icp_time / processed_frame_count;
+
+        println!("\n--- Average Execution Times (over {} frames) ---", processed_frame_count);
+        println!("Avg Preprocessing: {:.3?}", avg_preprocess);
+        println!("Avg k-d tree:      {:.3?}", avg_kdtree);
+        println!("Avg Normals:       {:.3?}", avg_normals);
+        println!("Avg ICP:           {:.3?}", avg_icp);
     }
 
     println!("Current global pose:\n{}", current_global_pose);
