@@ -14,14 +14,14 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 300;
-const TRIM_PERCENTAGE: f64 = 0.9;
+const SAMPLE_SIZE: usize = 7200;
+const TRIM_PERCENTAGE: f64 = 1.0;
 
 const K_NEIGHBORS: usize = 15;
 
 fn main() -> Result<()> {
-    let target_pcd_file_path = "data/input/avia/voxelized-025_frame_400.pcd";
-    let source_pcd_file_path = "data/input/avia/voxelized-025_frame_410.pcd";
+    let target_pcd_file_path = "data/input/H927/lab-room_voxel_025_xyz_only.pcd";
+    let source_pcd_file_path = "data/input/H927/vggt-data_output_voxel_025_xyz_only.pcd";
     let target_d = load_pcd_xyz(target_pcd_file_path)
         .context("Failed to load PCD file")?;
     let source_d = load_pcd_xyz(source_pcd_file_path)
@@ -36,7 +36,7 @@ fn main() -> Result<()> {
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
-    let max_iterations = 20;
+    let max_iterations = 40;
     let tolerance = 0.015;  // Prev: 1e-2
 
     // let current_source_pts_arr = source_pts_arr.clone();
@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
     let target_pts_with_normals = create_points_with_normals(&target_pts_arr, &target_normals);
 
-    let normals_save_path = "data/output/with-normals/target_with_normals.pcd";
+    let normals_save_path = "data/output/H927-matching/with-normals/target_with_normals.pcd";
     match save_pcd_with_normals(&target_pts_with_normals, normals_save_path) {
         Ok(_) => println!("Saved target points with normals to {}", normals_save_path),
         Err(e) => eprintln!("Failed to save PCD file with normals: {}", e),
@@ -190,7 +190,7 @@ fn main() -> Result<()> {
     all_points.extend(colored_source_pts.clone());
 
     // Save each point clouds
-    let save_path = "data/output/icp_p-to-plane_aligned_result_v-025.pcd";
+    let save_path = "data/output/H927-matching/icp_p-to-plane_aligned_result_v-025.pcd";
     match save_pcd(&all_points, save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
