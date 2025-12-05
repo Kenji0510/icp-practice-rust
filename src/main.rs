@@ -36,6 +36,12 @@ fn main() -> Result<()> {
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
+    let (transformed_centroid, transformed_source_pts_arr) = registration_pcd_center(
+        &source_pts_arr,
+        &target_pts_arr
+    );
+    println!("Source point cloud centered to target centroid.");
+
     let max_iterations = 40;
     let tolerance = 0.015;  // Prev: 1e-2
 
@@ -73,9 +79,11 @@ fn main() -> Result<()> {
 
     let mut total_transform = Array2::<f64>::eye(4);
 
-    let n_points_source = source_pts_arr.nrows();
+    // let n_points_source = source_pts_arr.nrows();
+    let n_points_source = transformed_source_pts_arr.nrows();
     let mut source_homogeneous = Array2::<f64>::ones((n_points_source, 4));
-    source_homogeneous.slice_mut(s![.., 0..3]).assign(&source_pts_arr);
+    // source_homogeneous.slice_mut(s![.., 0..3]).assign(&source_pts_arr);
+    source_homogeneous.slice_mut(s![.., 0..3]).assign(&transformed_source_pts_arr);
 
     let mut rng = thread_rng();
     let source_indices: Vec<usize> = (0..n_points_source).collect();
@@ -184,10 +192,13 @@ fn main() -> Result<()> {
     let colored_target_pts = target_pts.transform_colored_points((0, 0, 255)); // 青
     let colored_source_pts = source_pts.transform_colored_points((255, 0, 0)); // 赤
     let colored_aligned_source_pts = aligned_source_pts.transform_colored_points((0, 255, 0)); // 緑
+    let colored_transformed_source_pts = array2_to_points(&transformed_source_pts_arr.to_owned())
+        .transform_colored_points((255, 255, 0)); // 黄色
 
     let mut all_points = colored_target_pts.clone();
     all_points.extend(colored_aligned_source_pts.clone());
     all_points.extend(colored_source_pts.clone());
+    all_points.extend(colored_transformed_source_pts.clone());
 
     // Save each point clouds
     let save_path = "data/output/H927-matching/icp_p-to-plane_aligned_result_v-025.pcd";
@@ -428,6 +439,32 @@ fn calculate_normals(
     });
 
     Ok(normals)
+}
+
+fn registration_pcd_center(
+    source_points: &Array2<f64>,
+    target_points: &Array2<f64>
+) -> (Array2<f64>, Array2<f64>) {
+    // Calculate centroids
+    let source_centroid = source_points.mean_axis(Axis(0)).unwrap();
+    let target_centroid = target_points.mean_axis(Axis(0)).unwrap();
+
+    // Calculate translation
+    let translation = &target_centroid - &source_centroid;
+
+    // Create transformation matrix
+    let mut transform = Array2::<f64>::eye(4);
+    transform[[0, 3]] = translation[0];
+    transform[[1, 3]] = translation[1];
+    transform[[2, 3]] = translation[2];
+    
+    let n_points = source_points.nrows();
+    let mut source_copy = Array2::<f64>::ones((n_points, 4));
+    source_copy.slice_mut(s![.., 0..3]).assign(source_points);
+
+    let transformed = source_copy.dot(&transform.t());
+    let transformed_source = transformed.slice(s![.., 0..3]).to_owned();
+    (transform, transformed_source)
 }
 
 fn array2_to_points(
