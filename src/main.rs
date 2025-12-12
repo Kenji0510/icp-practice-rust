@@ -1,15 +1,28 @@
-use std::{collections::VecDeque, fs::File, io::BufReader, usize};
+use std::{collections::VecDeque, fs::File, io::{BufReader, BufWriter}, usize};
 
 use anyhow::{Result, Context};
 use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZT, Points, load_pcd_xyzt}, voxelization::voxel_downsample_array2};
-use nalgebra::{Matrix3, Rotation3, SymmetricEigen, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Rotation3, SymmetricEigen, Unit, UnitQuaternion, Vector3};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
 use ndarray_linalg::{Inverse, Norm, SVD, Solve};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 // use rayon::prelude::*;
+
+#[derive(Serialize)]
+struct PoseData {
+    timestamp: f64,
+    position: [f32; 3],      // x, y, z
+    rotation_quat: [f32; 4], // w, x, y, z
+}
+
+#[derive(Serialize)]
+struct TrajectoryOutput {
+    icp_trajectory: Vec<PoseData>,
+    imu_raw_trajectory: Vec<PoseData>,
+}
 
 // const WIDTH: f64 = 10.0;
 // const HEIGHT: f64 = 5.0;
@@ -22,10 +35,10 @@ const TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 20;
 const MAX_ITERATIONS: usize = 20;
 const TOLERANCE: f32 = 0.050;  // Prev: 0.015
-const VOXEL_SIZE: f32 = 0.2;
+const VOXEL_SIZE: f32 = 0.1;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-07";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-06";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -36,7 +49,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-07/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-06/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -47,6 +60,8 @@ fn main() -> Result<()> {
     
     let base_timestamp = imu_samples[0].timestamp_sec;
     println!("Base timestamp set to: {:.3}", base_timestamp);
+
+    let mut icp_trajectory_log: Vec<PoseData> = Vec::new();
 
     // let initial_pcd = match load_pcd_xyz(pcd_paths[0].to_str().unwrap()) {
     let initial_pcd = match load_pcd_xyzt(pcd_paths[0].to_str().unwrap()) {
@@ -82,6 +97,8 @@ fn main() -> Result<()> {
     
     local_map_queue.push_back(initial_pts_arr.clone());
     global_map_accumulator.push(initial_pts_arr.clone());
+
+    icp_trajectory_log.push(extract_pose_from_matrix(base_timestamp, &current_global_pose));
     
 
     for (i, pcd_path) in pcd_paths.iter().enumerate() {
@@ -92,7 +109,7 @@ fn main() -> Result<()> {
 
         // Loading current frame pcd
         // let current_pcd = match load_pcd_xyz(pcd_path.to_str().unwrap()) {
-        let current_pcd = match load_pcd_xyzt(pcd_path.to_str().unwrap()) {
+        let mut current_pcd = match load_pcd_xyzt(pcd_path.to_str().unwrap()) {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Error loading PCD file {}: {}", pcd_path.display(), e);
@@ -101,6 +118,18 @@ fn main() -> Result<()> {
         };
 
         if current_pcd.is_empty() { continue; }
+
+        // =================================================================
+        // ★追加: タイムスタンプの単位変換 (ナノ秒 -> 秒)
+        // =================================================================
+        // 最初の点のタイムスタンプをチェック
+        // 1e16 (10,000,000,000,000,000) 以上ならナノ秒とみなして変換
+        if current_pcd[0].timestamp > 1e16 {
+            // println!("Converting timestamps from nanoseconds to seconds...");
+            for p in &mut current_pcd {
+                p.timestamp /= 1_000_000_000.0;
+            }
+        }
 
         let start_time = std::time::Instant::now();
         
@@ -235,6 +264,7 @@ fn main() -> Result<()> {
             // --- 2f. "総" 変換行列を更新 ---
             // T_k+1 = DeltaT * T_k
             total_transform = delta_transform.dot(&total_transform);
+            icp_trajectory_log.push(extract_pose_from_matrix(min_timestamp, &current_global_pose));
             
             // --- 2g. エラー計算 (Point-to-Plane 誤差) ---
             let current_error = calculate_mean_pt_to_plane_error(
@@ -330,6 +360,22 @@ fn main() -> Result<()> {
         processed_frame_count += 1;
     }
 
+    println!("Generating raw IMU trajectory (with integration)...");
+    
+    // 加速度情報を使って位置推定も行う関数を呼び出し
+    let imu_trajectory_log = compute_imu_only_trajectory(&imu_samples, base_timestamp);
+
+    let output_data = TrajectoryOutput {
+        icp_trajectory: icp_trajectory_log,
+        imu_raw_trajectory: imu_trajectory_log,
+    };
+
+    let json_path = "data/output/icp_map/myself-position/trajectory_comparison.json";
+    let file = File::create(json_path).context("Failed to create JSON output file")?;
+    let writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, &output_data).context("Failed to write JSON data")?;
+    println!("Saved trajectory data to {}", json_path);
+
     if processed_frame_count > 0 {
         let avg_preprocess = total_preprocess_time / processed_frame_count;
         let avg_kdtree = total_kdtree_time / processed_frame_count;
@@ -353,12 +399,117 @@ fn main() -> Result<()> {
     println!("Distance from start: {:.3} meters", distance_from_start);
 
     // Save final merged point cloud
-    let final_points = array2_to_points(&target_pts_arr);
-    let final_save_path = "data/output/icp_map/final_merged.pcd";
-    final_points.save_pcd(final_save_path, (255, 0, 0))
+    // let final_points = array2_to_points(&target_pts_arr);
+    // let final_save_path = "data/output/icp_map/final_merged.pcd";
+    let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+    let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+    let final_map_points = array2_to_points(&voxelized_final_map);
+    // final_points.save_pcd(final_save_path, (255, 0, 0))
+    //     .context("Failed to save final merged PCD file")?;
+    let final_save_path = "data/output/icp_map/final_map/final_merged_map.pcd";
+    final_map_points.save_pcd(final_save_path, (255, 0, 0))
         .context("Failed to save final merged PCD file")?;
-
+    println!("Saved final merged point cloud to {}", final_save_path);
+    
     Ok(())
+}
+
+/// 4x4行列から PoseData を抽出するヘルパー
+fn extract_pose_from_matrix(timestamp: f64, transform: &Array2<f32>) -> PoseData {
+    let tx = transform[[0, 3]];
+    let ty = transform[[1, 3]];
+    let tz = transform[[2, 3]];
+
+    // 回転行列成分を抽出
+    let mat3 = Matrix3::new(
+        transform[[0, 0]] as f64, transform[[0, 1]] as f64, transform[[0, 2]] as f64,
+        transform[[1, 0]] as f64, transform[[1, 1]] as f64, transform[[1, 2]] as f64,
+        transform[[2, 0]] as f64, transform[[2, 1]] as f64, transform[[2, 2]] as f64,
+    );
+    let q = UnitQuaternion::from_matrix(&mat3);
+
+    PoseData {
+        timestamp,
+        position: [tx, ty, tz],
+        rotation_quat: [q.w as f32, q.i as f32, q.j as f32, q.k as f32],
+    }
+}
+
+/// IMUデータのみを使って全期間の軌跡（回転 + 位置）を計算する
+/// 加速度の二重積分を行うため、時間が経つにつれて位置ズレ（ドリフト）が激しくなります。
+fn compute_imu_only_trajectory(imu_samples: &[ImuSample], start_time: f64) -> Vec<PoseData> {
+    let mut trajectory = Vec::new();
+    
+    // 状態変数
+    let mut position = Vector3::new(0.0, 0.0, 0.0);
+    let mut velocity = Vector3::new(0.0, 0.0, 0.0);
+    let mut rotation = UnitQuaternion::identity();
+
+    // 重力ベクトル (World frame, Z-upと仮定: 9.80665 m/s^2)
+    // ※ Livox Mid-360の設置向きによって異なりますが、ここでは標準的なZ軸上向きと仮定します
+    // ※ 厳密には最初の静止状態で重力方向を推定する必要がありますが、簡易版として固定値を使います
+    let gravity = Vector3::new(0.0, 0.0, 9.80665);
+
+    let mut last_time = start_time;
+
+    // 最初の点を追加
+    trajectory.push(PoseData {
+        timestamp: start_time,
+        position: [position.x as f32, position.y as f32, position.z as f32],
+        rotation_quat: [rotation.w as f32, rotation.i as f32, rotation.j as f32, rotation.k as f32],
+    });
+
+    for sample in imu_samples {
+        if sample.timestamp_sec < start_time {
+            continue;
+        }
+
+        let dt = sample.timestamp_sec - last_time;
+        if dt <= 1e-9 { continue; }
+
+        // 1. ジャイロによる回転の更新
+        let wx = sample.gyro[0] as f64;
+        let wy = sample.gyro[1] as f64;
+        let wz = sample.gyro[2] as f64;
+        let omega = Vector3::new(wx, wy, wz);
+        
+        let angle = omega.norm() * dt;
+        let axis = if angle < 1e-9 { Vector3::x_axis() } else { Unit::new_normalize(omega) };
+        let delta_q = UnitQuaternion::from_axis_angle(&axis, angle);
+        
+        rotation = rotation * delta_q;
+        rotation.renormalize();
+
+        // 2. 加速度による位置の更新
+        let ax = sample.linear_acceleration[0] as f64;
+        let ay = sample.linear_acceleration[1] as f64;
+        let az = sample.linear_acceleration[2] as f64;
+        let acc_local = Vector3::new(ax, ay, az);
+
+        // ローカル座標の加速度をグローバル座標系へ変換
+        let acc_global = rotation * acc_local;
+
+        // 重力除去 (Linear acceleration = Measured - Gravity)
+        // 加速度センサは「重力と逆方向の力」を計測しているため、
+        // 静止時は(0,0,1g)を出力します。そこから(0,0,1g)を引くことで運動加速度を得ます。
+        let acc_net = acc_global - gravity;
+
+        // 速度更新 (v = v + a*dt)
+        velocity += acc_net * dt;
+
+        // 位置更新 (p = p + v*dt + 0.5*a*dt^2)
+        position += velocity * dt + 0.5 * acc_net * dt * dt;
+
+        last_time = sample.timestamp_sec;
+
+        trajectory.push(PoseData {
+            timestamp: sample.timestamp_sec,
+            position: [position.x as f32, position.y as f32, position.z as f32],
+            rotation_quat: [rotation.w as f32, rotation.i as f32, rotation.j as f32, rotation.k as f32],
+        });
+    }
+
+    trajectory
 }
 
 // (時刻, その時刻までの累積回転) のペア
@@ -814,6 +965,7 @@ fn find_closest_pairs_kdtree(
 struct LivoxImuBatch {
     timestamp: u64, // ナノ秒と仮定 (例: 484350964530)
     angular_velocity: Vec<[f32; 3]>,
+    linear_acceleration: Vec<[f32; 3]>,
     sample_count: usize,
     // sample_count は Vecのlen()でわかるので無視してもOK
 }
@@ -823,6 +975,7 @@ struct LivoxImuBatch {
 struct ImuSample {
     timestamp_sec: f64, // 計算しやすいように秒単位(f64)に変換して持つ
     gyro: Array1<f32>,
+    linear_acceleration: Array1<f32>,
     sample_count: usize,
 }
 
@@ -847,6 +1000,11 @@ fn load_and_flatten_imu_json(path: &str) -> Result<Vec<ImuSample>> {
             samples.push(ImuSample {
                 timestamp_sec: current_time,
                 gyro: arr1(&[gyro[0] as f32, gyro[1] as f32, gyro[2] as f32]),
+                linear_acceleration: arr1(&[
+                    batch.linear_acceleration[i][0] as f32,
+                    batch.linear_acceleration[i][1] as f32,
+                    batch.linear_acceleration[i][2] as f32
+                ]),
                 sample_count: 1,
             });
         }
