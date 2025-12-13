@@ -24,6 +24,11 @@ struct TrajectoryOutput {
     imu_raw_trajectory: Vec<PoseData>,
 }
 
+struct FrameData {
+    points: Array2<f32>,
+    covariances: Vec<Matrix3<f64>>,
+}
+
 // const WIDTH: f64 = 10.0;
 // const HEIGHT: f64 = 5.0;
 // const ROTATION_ANGLE_DEG: f64 = 25.0;
@@ -32,8 +37,8 @@ struct TrajectoryOutput {
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
 const SAMPLE_SIZE: usize = 1000;
 const TRIM_PERCENTAGE: f64 = 1.0;
-const K_NEIGHBORS: usize = 60;
-const MAX_ITERATIONS: usize = 40;
+const K_NEIGHBORS: usize = 50;
+const MAX_ITERATIONS: usize = 10;
 const TOLERANCE: f32 = 0.01;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.1;  // 0.2
 
@@ -73,14 +78,15 @@ fn main() -> Result<()> {
     };
 
     let initial_pts_arr = point_xyzt_to_array2(&initial_pcd);
-    let mut target_pts_arr = initial_pts_arr.clone();
+    // let mut target_pts_arr = initial_pts_arr.clone();
 
     let mut current_global_pose = Array2::<f32>::eye(4);
     let mut last_delta_transform = Array2::<f32>::eye(4);
 
     // Local map queue
-    let mut local_map_queue: VecDeque<Array2<f32>> = VecDeque::new();
-    const LOCAL_MAP_SIZE: usize = 10;
+    // let mut local_map_queue: VecDeque<Array2<f32>> = VecDeque::new();
+    let mut local_map_queue: VecDeque<FrameData> = VecDeque::new();
+    const LOCAL_MAP_SIZE: usize = 20;
 
     // Global map accumulator
     let mut global_map_accumulator: Vec<Array2<f32>> = Vec::new();
@@ -95,7 +101,7 @@ fn main() -> Result<()> {
     let mut total_icp_time = std::time::Duration::new(0, 0);
     let mut processed_frame_count: u32 = 0;
     
-    local_map_queue.push_back(initial_pts_arr.clone());
+    // local_map_queue.push_back(initial_pts_arr.clone());
     global_map_accumulator.push(initial_pts_arr.clone());
 
     icp_trajectory_log.push(extract_pose_from_matrix(base_timestamp, &current_global_pose));
@@ -157,38 +163,58 @@ fn main() -> Result<()> {
         );
         let elapsed_preprocess = start_time.elapsed();
 
-        current_pts_arr = voxel_downsample_array2(&current_pts_arr, VOXEL_SIZE);
+        // current_pts_arr = voxel_downsample_array2(&current_pts_arr, VOXEL_SIZE);
 
-        // Concatenate local map points
-        let local_map_views: Vec<_> = local_map_queue.iter()
-            .map(|p| p.view())
-            .collect();
-        target_pts_arr = ndarray::concatenate(
-            Axis(0),
-            &local_map_views
-        ).context("Failed to concatenate arrays for local map")?;
-
-        target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
+        // !--- End of Preprocessing ---!
 
         // Create KdTree for target points
-        println!("Building k-d tree for target points...");
-        let target_points: Vec<[f32; 3]> = target_pts_arr.outer_iter()
-            .map(|row| [row[0], row[1], row[2]])
-            .collect();
-        let kdtree_target: kiddo::ImmutableKdTree<f32, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
-
-        println!("Computing target covariances...");
-        let target_covs = compute_covariances(&target_pts_arr, &kdtree_target);
-
-        println!("k-d tree built with {} points.", target_pts_arr.nrows());
-        let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
-
+        let start_time = std::time::Instant::now();
+        println!("Building k-d tree for each points...");
         // ★GICP変更点2: Sourceの共分散行列を計算
         let source_points_vec: Vec<[f32; 3]> = current_pts_arr.outer_iter()
             .map(|row| [row[0], row[1], row[2]])
             .collect();
         let kdtree_source = kiddo::ImmutableKdTree::new_from_slice(&source_points_vec);
         let source_covs = compute_covariances(&current_pts_arr, &kdtree_source);
+
+        // !--- End of KdTree build ---!
+
+        // Downsample source points and covariances together
+        let (downsampled_pts, downsampled_covs) = voxel_downsample_with_cov(
+            &current_pts_arr, 
+            &source_covs, 
+            VOXEL_SIZE
+        );
+
+        // !--- End of Downsampling ---!
+
+        // Combine local map points into target_pts_arr
+        let (target_pts_arr, target_covs) = if local_map_queue.is_empty() {
+            // 初回フレーム: ダウンサンプル済みの現在フレームを target として使う
+            (downsampled_pts.clone(), downsampled_covs.clone())
+        } else {
+            flatten_local_map(&local_map_queue)?
+        };
+
+        let target_points_vec: Vec<[f32; 3]> = target_pts_arr.outer_iter()
+        .map(|row| [row[0], row[1], row[2]])
+        .collect();
+        let kdtree_target = kiddo::ImmutableKdTree::new_from_slice(&target_points_vec);
+
+        // Concatenate local map points
+        // let local_map_views: Vec<_> = local_map_queue.iter()
+        //     .map(|p| p.view())
+        //     .collect();
+        // target_pts_arr = ndarray::concatenate(
+        //     Axis(0),
+        //     &local_map_views
+        // ).context("Failed to concatenate arrays for local map")?;
+
+        // target_pts_arr = voxel_downsample_array2(&target_pts_arr, VOXEL_SIZE);
+
+
+        // println!("k-d tree built with {} points.", target_pts_arr.nrows());
+        let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
 
         // Sourceの法線を計算 (数千点なので高速)
         let tx = current_global_pose[[0, 3]];
@@ -344,13 +370,32 @@ fn main() -> Result<()> {
             
             if rotation_diff < ANGLE_THRESHOLD {
                 // 1. 点群の変換
-                let cloned_source_pts = original_source_pts.clone();
-                let final_transformed_homogeneous = cloned_source_pts.dot(&total_transform.t());
+                let n_down = downsampled_pts.nrows();
+                let mut downsampled_homo = Array2::<f32>::ones((n_down, 4));
+                downsampled_homo.slice_mut(s![.., 0..3]).assign(&downsampled_pts);
+                
+                // 変換行列を適用
+                let final_transformed_homogeneous = downsampled_homo.dot(&total_transform.t());
+                let r_mat = total_transform.slice(s![0..3, 0..3]).to_owned();
                 let aligned_pts = final_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
+                let aligned_covs: Vec<Matrix3<f64>> = downsampled_covs.iter()
+                    .map(|c| {
+                        // Convert ndarray to nalgebra Matrix3 for multiplication
+                        let r_nalgebra = Matrix3::new(
+                            r_mat[[0, 0]] as f64, r_mat[[0, 1]] as f64, r_mat[[0, 2]] as f64,
+                            r_mat[[1, 0]] as f64, r_mat[[1, 1]] as f64, r_mat[[1, 2]] as f64,
+                            r_mat[[2, 0]] as f64, r_mat[[2, 1]] as f64, r_mat[[2, 2]] as f64,
+                        );
+                        r_nalgebra * c * r_nalgebra.transpose()
+                    })
+                    .collect();
 
                 // 2. ローカルマップに追加
                 if i % 2 == 0 {
-                    local_map_queue.push_back(aligned_pts.clone());
+                    local_map_queue.push_back(FrameData {
+                        points: aligned_pts.clone(),
+                        covariances: aligned_covs.clone(),
+                    });
                 }
                 
                 if local_map_queue.len() > LOCAL_MAP_SIZE {
@@ -358,22 +403,22 @@ fn main() -> Result<()> {
                 }
 
                 // 3. グローバルマップへの保存
-                if i % 5 == 0 {
+                if i % 2 == 0 {
                     global_map_accumulator.push(aligned_pts.to_owned());
                 }
             }
         }
 
         // Debug
-        // if i % 20 == 0 {
-        //     // 最後に global_map_accumulator を全部結合して保存
-        //     let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-        //     let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
-        //     let final_map_points = array2_to_points(&voxelized_final_map);
-        //     let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
-        //     final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
-        //         .context("Failed to save debug merged PCD file")?;
-        // }
+        if i % 20 == 0 {
+            // 最後に global_map_accumulator を全部結合して保存
+            let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+            let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+            let final_map_points = array2_to_points(&voxelized_final_map);
+            let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
+            final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
+                .context("Failed to save debug merged PCD file")?;
+        }
 
         println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, normals time: {:.3?}, ICP time: {:.3?}",
             elapsed_preprocess,
@@ -441,6 +486,81 @@ fn main() -> Result<()> {
     println!("Saved final merged point cloud to {}", final_save_path);
     
     Ok(())
+}
+
+fn flatten_local_map(
+    queue: &VecDeque<FrameData>
+) -> Result<(Array2<f32>, Vec<Matrix3<f64>>)> {
+    
+    // 1. 点群 (Array2) の結合
+    // ndarray::concatenate は View のリストを受け取るので、各フレームのViewを集めます
+    let points_views: Vec<_> = queue.iter()
+        .map(|frame| frame.points.view())
+        .collect();
+
+    // Axis(0) = 行方向（縦）に結合
+    let merged_points = ndarray::concatenate(Axis(0), &points_views)
+        .context("Failed to concatenate local map points")?;
+
+    // 2. 共分散 (Vec) の結合
+    // 事前にサイズを計算して reserve することで、メモリ確保のオーバーヘッドを防ぎます
+    let total_points = merged_points.nrows();
+    let mut merged_covs = Vec::with_capacity(total_points);
+
+    for frame in queue {
+        // extend_from_slice は高速にコピーを行います (Matrix3はCopy/Clone可能)
+        merged_covs.extend_from_slice(&frame.covariances);
+    }
+
+    // 整合性チェック (念のため)
+    if merged_points.nrows() != merged_covs.len() {
+        return Err(anyhow::anyhow!(
+            "Mismatch between points count ({}) and covariances count ({}) in local map",
+            merged_points.nrows(),
+            merged_covs.len()
+        ));
+    }
+
+    Ok((merged_points, merged_covs))
+}
+
+fn voxel_downsample_with_cov(
+    pts: &Array2<f32>,
+    covs: &[Matrix3<f64>],
+    voxel_size: f32
+) -> (Array2<f32>, Vec<Matrix3<f64>>) {
+    let mut grid = std::collections::HashMap::new();
+
+    for i in 0..pts.nrows() {
+        let x = pts[[i, 0]];
+        let y = pts[[i, 1]];
+        let z = pts[[i, 2]];
+
+        let ix = (x / voxel_size).floor() as i32;
+        let iy = (y / voxel_size).floor() as i32;
+        let iz = (z / voxel_size).floor() as i32;
+        let key = (ix, iy, iz);
+
+        // 各ボクセルにつき1点だけ登録（早い者勝ち、または重心に近いもの）
+        grid.entry(key).or_insert(i);
+    }
+
+    let mut kept_indices: Vec<usize> = grid.values().cloned().collect();
+    kept_indices.sort_unstable();
+
+    // 抽出
+    let n_kept = kept_indices.len();
+    let mut new_pts = Array2::<f32>::zeros((n_kept, 3));
+    let mut new_covs = Vec::with_capacity(n_kept);
+
+    for (k, &orig_idx) in kept_indices.iter().enumerate() {
+        new_pts[[k, 0]] = pts[[orig_idx, 0]];
+        new_pts[[k, 1]] = pts[[orig_idx, 1]];
+        new_pts[[k, 2]] = pts[[orig_idx, 2]];
+        new_covs.push(covs[orig_idx]);
+    }
+
+    (new_pts, new_covs)
 }
 
 /// 4x4行列から PoseData を抽出するヘルパー
