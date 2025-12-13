@@ -34,11 +34,11 @@ const SAMPLE_SIZE: usize = 500;
 const TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 20;
 const MAX_ITERATIONS: usize = 20;
-const TOLERANCE: f32 = 0.050;  // Prev: 0.015
+const TOLERANCE: f32 = 0.010;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.1;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-06";
+    let target_pcd_dir = "data/input/20251212/mid360-pointcloud2-bag-01/mid360";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -49,7 +49,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-06/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/20251212/mid360-pointcloud2-bag-01/mid360-imu/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -336,15 +336,15 @@ fn main() -> Result<()> {
         }
 
         // Debug
-        // if i % 20 == 0 {
-        //     // 最後に global_map_accumulator を全部結合して保存
-        //     let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-        //     let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
-        //     let final_map_points = array2_to_points(&voxelized_final_map);
-        //     let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
-        //     final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
-        //         .context("Failed to save debug merged PCD file")?;
-        // }
+        if i % 20 == 0 {
+            // 最後に global_map_accumulator を全部結合して保存
+            let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+            let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+            let final_map_points = array2_to_points(&voxelized_final_map);
+            let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
+            final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
+                .context("Failed to save debug merged PCD file")?;
+        }
 
         println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, normals time: {:.3?}, ICP time: {:.3?}",
             elapsed_preprocess,
