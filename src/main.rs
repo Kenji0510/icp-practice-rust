@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fs::File, io::{BufReader, BufWriter}, usize};
+use std::{collections::VecDeque, fs::File, io::{BufReader, BufWriter}, num::NonZero, usize};
 
 use anyhow::{Result, Context};
 use icp_practice::{file_handler::load_pcd_files, operate_pcd::{PointXYZ, PointXYZT, Points, load_pcd_xyzt}, voxelization::voxel_downsample_array2};
@@ -30,11 +30,11 @@ struct TrajectoryOutput {
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 500;
+const SAMPLE_SIZE: usize = 1000;
 const TRIM_PERCENTAGE: f64 = 1.0;
-const K_NEIGHBORS: usize = 20;
-const MAX_ITERATIONS: usize = 20;
-const TOLERANCE: f32 = 0.010;  // Prev: 0.015
+const K_NEIGHBORS: usize = 60;
+const MAX_ITERATIONS: usize = 40;
+const TOLERANCE: f32 = 0.01;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.1;  // 0.2
 
 fn main() -> Result<()> {
@@ -177,8 +177,18 @@ fn main() -> Result<()> {
             .collect();
         let kdtree_target: kiddo::ImmutableKdTree<f32, 3> = kiddo::ImmutableKdTree::new_from_slice(&target_points);
 
+        println!("Computing target covariances...");
+        let target_covs = compute_covariances(&target_pts_arr, &kdtree_target);
+
         println!("k-d tree built with {} points.", target_pts_arr.nrows());
         let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
+
+        // ★GICP変更点2: Sourceの共分散行列を計算
+        let source_points_vec: Vec<[f32; 3]> = current_pts_arr.outer_iter()
+            .map(|row| [row[0], row[1], row[2]])
+            .collect();
+        let kdtree_source = kiddo::ImmutableKdTree::new_from_slice(&source_points_vec);
+        let source_covs = compute_covariances(&current_pts_arr, &kdtree_source);
 
         // Sourceの法線を計算 (数千点なので高速)
         let tx = current_global_pose[[0, 3]];
@@ -201,13 +211,15 @@ fn main() -> Result<()> {
         let mut rng = thread_rng();
         let source_indices: Vec<usize> = (0..source_points_num).collect();
 
+        let mut prev_fitness_score = f64::MAX;
+
         let start_icp_time = std::time::Instant::now();
         for i in 0..MAX_ITERATIONS {
             // --- 2b. "現在" のソース点群を計算 ---
             let current_transformed_homogeneous = original_source_pts.dot(&total_transform.t());
             let current_source_pts_arr = current_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
-            let (sampled_source_pts, _) = 
+            let (sampled_source_pts, sampled_source_indices) = 
                 if source_points_num <= SAMPLE_SIZE {
                     (current_source_pts_arr.clone(), source_indices.clone())
                 } else {
@@ -223,71 +235,88 @@ fn main() -> Result<()> {
             let (matched_target_pts, matched_target_indices, distance_sq) = 
                 find_closest_pairs_kdtree(&sampled_source_pts, &target_pts_arr, &kdtree_target);
 
-            // インライア選択
             let mut dist_with_indices: Vec<(f32, usize)> = distance_sq.iter()
                 .cloned()
                 .enumerate()
                 .map(|(idx, dist)| (dist, idx))
                 .collect();
             dist_with_indices.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
             let n_to_keep = (dist_with_indices.len() as f64 * TRIM_PERCENTAGE) as usize;
-            let inlier_indices: Vec<usize> = dist_with_indices.iter()
+            let inlier_local_indices: Vec<usize> = dist_with_indices.iter()
                 .take(n_to_keep)
                 .map(|&(_dist, idx)| idx)
                 .collect();
+
+            // ----------------------------------------------------------------
+            // 4. ★追加: 現在のRMSE (Fitness Score) を計算
+            // ----------------------------------------------------------------
+            // まだ変換行列(delta)を適用する「前」の、現在の位置合わせ状態での誤差
+            // GICPの目的はこの誤差（マハラノビス距離に近いが、簡易的にユークリッドRMSEで代用可）を下げること
+            let inlier_dists_sum: f32 = inlier_local_indices.iter()
+                .map(|&idx| distance_sq[idx]) // distance_sq は既に二乗距離
+                .sum();
             
-            // インライアの点群を取得
-            let inlier_source_pts = sampled_source_pts.select(Axis(0), &inlier_indices);
-            let inlier_target_pts = matched_target_pts.select(Axis(0), &inlier_indices);
+            let current_fitness_score = (inlier_dists_sum as f64 / n_to_keep as f64).sqrt();
 
-            // --- 2d. インライアの "法線" を取得 ---
-            // `inlier_indices` を使って `matched_target_indices` から "グローバルインデックス" を取得
-            let inlier_target_global_indices: Vec<usize> = inlier_indices.iter()
-                .map(|&idx_n| matched_target_indices[idx_n])
+            // ソルバーに渡すためのデータを抽出
+            let inlier_source_pts = sampled_source_pts.select(Axis(0), &inlier_local_indices);
+            let inlier_target_pts = matched_target_pts.select(Axis(0), &inlier_local_indices);
+
+            // ★GICP変更点3: インライアの共分散行列を収集
+            // 対応する source_covs と target_covs をインデックスで抽出
+            let inlier_source_covs: Vec<Matrix3<f64>> = inlier_local_indices.iter()
+                .map(|&local_idx| {
+                    let original_idx = sampled_source_indices[local_idx]; 
+                    source_covs[original_idx]
+                })
                 .collect();
-            // グローバルインデックスを使って `target_normals` から法線を抽出
-            let inlier_target_normals = target_normals.select(Axis(0), &inlier_target_global_indices);
 
-            // --- 2e. "Point-to-Plane" ---
-            let delta_transform = match calculate_transformation_pt_to_plane(
+            // target_covs: 最近傍点のインデックスが必要
+            // -> matched_target_indices[local_idx] でターゲットIDが取れる
+            let inlier_target_covs: Vec<Matrix3<f64>> = inlier_local_indices.iter()
+                .map(|&local_idx| {
+                    let target_idx = matched_target_indices[local_idx];
+                    target_covs[target_idx]
+                })
+                .collect();
+
+            // ★GICP変更点4: ソルバー呼び出し
+            let delta_transform = solve_gicp_step(
                 &inlier_source_pts,
+                &inlier_source_covs,
                 &inlier_target_pts,
-                &inlier_target_normals
-            ) {
-                Ok(tf) => tf,
-                Err(e) => {
-                    eprintln!("Warning: Failed to solve transformation, skipping iteration: {}", e);
-                    continue;
-                }
-            };
+                &inlier_target_covs,
+                &total_transform // 現在の姿勢 (Rの計算に必要)
+            )?;
 
             // --- 2f. "総" 変換行列を更新 ---
             // T_k+1 = DeltaT * T_k
             total_transform = delta_transform.dot(&total_transform);
             icp_trajectory_log.push(extract_pose_from_matrix(min_timestamp, &current_global_pose));
-            
-            // --- 2g. エラー計算 (Point-to-Plane 誤差) ---
-            let current_error = calculate_mean_pt_to_plane_error(
-                &inlier_source_pts, 
-                &inlier_target_pts, 
-                &inlier_target_normals,
-                &delta_transform // "今から" 適用する変換
-            );
-            
-            // println!("Iteration {}: mean pt-to-plane error (from {} inliers, {:.0}% kept) = {}", 
-            //     i + 1, 
-            //     inlier_indices.len(), 
-            //     TRIM_PERCENTAGE * 100.0,
-            //     current_error
-            // );
 
-            final_errors = current_error;
+            // ----------------------------------------------------------------
+            // 7. ★修正: 収束判定 (Convergence Check)
+            // ----------------------------------------------------------------
+            let translation_diff = delta_transform.slice(s![0..3, 3]).norm();
+            let trace_3x3 = delta_transform[[0, 0]] + delta_transform[[1, 1]] + delta_transform[[2, 2]];
+            let rotation_diff = ((trace_3x3 - 1.0) / 2.0).clamp(-1.0, 1.0).acos().abs();
 
-            if current_error < TOLERANCE {
+            let error_diff = (prev_fitness_score - current_fitness_score).abs();
+
+            final_errors = current_fitness_score as f32;
+            
+            // if i > 0 && error_diff < 1e-6 && translation_diff < 1e-4 {
+            // if i > 0 && error_diff < TOLERANCE as f64 && translation_diff < 1e-4 {
+            //     println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
+            //     break;
+            // }
+            if translation_diff < 1e-3 && rotation_diff < 1e-4 {
                 println!("Converged at iteration {}", i + 1);
-                println!("Final mean pt-to-plane error: {}", current_error);
                 break;
             }
+
+            prev_fitness_score = current_fitness_score;
         }
         let elapsed_icp = start_icp_time.elapsed();
 
@@ -307,8 +336,8 @@ fn main() -> Result<()> {
 
         //「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
-        const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
-        const ANGLE_THRESHOLD: f32 = 0.035; // 約0.5度以上回ったら
+        const MOVE_THRESHOLD: f32 = 0.04; // 2cm以上動いたら
+        const ANGLE_THRESHOLD: f32 = 0.1; // 約0.5度以上回ったら
 
         if i < 10 || translation_diff > MOVE_THRESHOLD {
             println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
@@ -336,15 +365,15 @@ fn main() -> Result<()> {
         }
 
         // Debug
-        if i % 20 == 0 {
-            // 最後に global_map_accumulator を全部結合して保存
-            let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-            let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
-            let final_map_points = array2_to_points(&voxelized_final_map);
-            let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
-            final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
-                .context("Failed to save debug merged PCD file")?;
-        }
+        // if i % 20 == 0 {
+        //     // 最後に global_map_accumulator を全部結合して保存
+        //     let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
+        //     let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+        //     let final_map_points = array2_to_points(&voxelized_final_map);
+        //     let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
+        //     final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
+        //         .context("Failed to save debug merged PCD file")?;
+        // }
 
         println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, normals time: {:.3?}, ICP time: {:.3?}",
             elapsed_preprocess,
@@ -433,6 +462,260 @@ fn extract_pose_from_matrix(timestamp: f64, transform: &Array2<f32>) -> PoseData
         position: [tx, ty, tz],
         rotation_quat: [q.w as f32, q.i as f32, q.j as f32, q.k as f32],
     }
+}
+
+fn compute_covariances(
+    pts: &Array2<f32>,
+    kdtree: &kiddo::ImmutableKdTree<f32, 3>,
+) -> Vec<Matrix3<f64>> {
+    let n_points = pts.nrows();
+    let k_neighbors = NonZero::new(20).unwrap();
+
+    (0..n_points).into_par_iter().map(|i| {
+        let qx = pts[[i, 0]];
+        let qy = pts[[i, 1]];
+        let qz = pts[[i, 2]];
+        let query = [qx, qy, qz];
+
+        // 1. 近傍探索
+        let neighbors = kdtree.nearest_n::<kiddo::SquaredEuclidean>(&query, k_neighbors);
+        
+        if neighbors.len() < 5 {
+            return Matrix3::identity(); // 点が少なすぎる場合は単位行列（球）
+        }
+
+        // 2. 重心 (Mean) 計算
+        let mut mean = Vector3::zeros();
+        for n in &neighbors {
+            let idx = n.item as usize;
+            mean += Vector3::new(pts[[idx, 0]] as f64, pts[[idx, 1]] as f64, pts[[idx, 2]] as f64);
+        }
+        mean /= neighbors.len() as f64;
+
+        // 3. 共分散 (Covariance) 計算
+        let mut cov = Matrix3::zeros();
+        for n in &neighbors {
+            let idx = n.item as usize;
+            let p = Vector3::new(pts[[idx, 0]] as f64, pts[[idx, 1]] as f64, pts[[idx, 2]] as f64);
+            let d = p - mean;
+            cov += d * d.transpose();
+        }
+        cov /= neighbors.len() as f64;
+
+        // 4. 正則化 (GICP Regularization) - ここが重要！
+        // 固有値分解して、分布を「パンケーキ状」に整形する
+        let eigen = SymmetricEigen::new(cov);
+        let rot = eigen.eigenvectors;
+        let mut vals = eigen.eigenvalues;
+
+        let mut pairs: Vec<(f64, usize)> = vals.iter().cloned().enumerate().map(|(i, v)| (v, i)).collect();
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let min_idx = pairs[0].1; // 最小固有値のインデックス
+        vals[min_idx] = 1e-3;     // 法線方向を薄くする
+        vals[pairs[1].1] = 1.0;
+        vals[pairs[2].1] = 1.0;
+
+        // C = R * S * R^T
+        let regularized_cov = rot * Matrix3::from_diagonal(&vals) * rot.transpose();
+        
+        regularized_cov
+    }).collect()
+}
+
+/// GICPの1ステップ (線形方程式の構築と求解)
+fn solve_gicp_step(
+    source_pts: &Array2<f32>,           // 現在位置にあるソース点 (N x 3)
+    source_covs: &[Matrix3<f64>],       // ソースの共分散 (初期姿勢での計算値)
+    target_pts: &Array2<f32>,           // 対応するターゲット点 (N x 3)
+    target_covs: &[Matrix3<f64>],       // 対応するターゲットの共分散
+    current_transform: &Array2<f32>,    // 現在の推定変換行列 (4x4)
+) -> Result<Array2<f32>> { // 戻り値: 微小移動行列 Delta T
+
+    let n = source_pts.nrows();
+    
+    // 現在の回転行列 R を抽出 (ソースの共分散を回転させるため)
+    let r_curr = Matrix3::new(
+        current_transform[[0,0]] as f64, current_transform[[0,1]] as f64, current_transform[[0,2]] as f64,
+        current_transform[[1,0]] as f64, current_transform[[1,1]] as f64, current_transform[[1,2]] as f64,
+        current_transform[[2,0]] as f64, current_transform[[2,1]] as f64, current_transform[[2,2]] as f64,
+    );
+
+    // H = J^T * Omega * J の累積用 (6x6)
+    let mut h = Array2::<f64>::zeros((6, 6));
+    // b = J^T * Omega * error の累積用 (6x1)
+    let mut b = Array1::<f64>::zeros(6);
+
+    // Rayonで並列化して H と b を計算し、最後にsumする
+    let (h_sum, b_sum) = (0..n).into_par_iter()
+        .map(|i| {
+            let p_s = Vector3::new(source_pts[[i,0]] as f64, source_pts[[i,1]] as f64, source_pts[[i,2]] as f64);
+            let p_t = Vector3::new(target_pts[[i,0]] as f64, target_pts[[i,1]] as f64, target_pts[[i,2]] as f64);
+            
+            // 1. マハラノビス距離の重み行列 (Information Matrix) Omega を計算
+            // C_sum = C_target + R * C_source * R^T
+            let c_s_rot = r_curr * source_covs[i] * r_curr.transpose();
+            let c_sum = target_covs[i] + c_s_rot;
+            
+            // Omega = (C_sum)^-1
+            let omega = match c_sum.try_inverse() {
+                Some(inv) => inv,
+                None => return (Array2::<f64>::zeros((6, 6)), Array1::<f64>::zeros(6)),
+            };
+
+            // 2. 誤差ベクトル
+            let error = p_t - p_s; // Target - Source
+
+            // 3. ヤコビアン J (6x3 ではなく 3x6 として扱い、J^T * Omega * J を計算)
+            // error = p_t - (R * p_s_original + t)
+            // 微小回転の線形化: - [p_s]x * w + v
+            // J = [Skew(p_s), -I] (※定義により符号は変わるが、ここでは標準的な構成で)
+            
+            // Jの各列ベクトル
+            // J_rot (p_s とのクロス積成分)
+            // [ 0,  z, -y]
+            // [-z,  0,  x]
+            // [ y, -x,  0]
+            let x = p_s.x; let y = p_s.y; let z = p_s.z;
+            
+            // 行列演算のために ndarray 形式に変換しつつ計算
+            // J^T * Omega * J を作るのが面倒なので、要素ごとに構築するアプローチ
+            
+            // J^T * Omega (6 x 3)
+            // J_rot^T * Omega
+            // J_trans^T * Omega
+            
+            // ここでは簡易的に、J^T * Omega * error と J^T * Omega * J を計算
+            
+            // Omega * error (3x1)
+            let w_e = omega * error;
+            
+            let mut local_b = Array1::<f64>::zeros(6);
+            
+            // Rotational part of b: (p_s x (Omega * error))
+            let cross = p_s.cross(&w_e);
+            local_b[0] = cross.x;
+            local_b[1] = cross.y;
+            local_b[2] = cross.z;
+            
+            // Translational part of b: Omega * error
+            local_b[3] = w_e.x;
+            local_b[4] = w_e.y;
+            local_b[5] = w_e.z;
+
+            // H = J^T * Omega * J の構築
+            let mut local_h = Array2::<f64>::zeros((6, 6));
+            
+            // Omega * J_rot (3x3) = Omega * Skew(p_s)
+            //   [ 0,  z, -y]
+            // S=[-z,  0,  x]
+            //   [ y, -x,  0]
+            // Col0 = Omega * [0, -z, y]^T
+            let s_col0 = Vector3::new(0.0, -z, y);
+            let s_col1 = Vector3::new(z, 0.0, -x);
+            let s_col2 = Vector3::new(-y, x, 0.0);
+            
+            let w_s0 = omega * s_col0;
+            let w_s1 = omega * s_col1;
+            let w_s2 = omega * s_col2;
+
+            // 左上: J_rot^T * Omega * J_rot
+            // (Skew(p_s)^T * [w_s0, w_s1, w_s2])
+            // Skew^T = -Skew なので、cross productを使って計算可能
+            // col0 = p_s x w_s0
+            let h00 = p_s.cross(&w_s0);
+            let h01 = p_s.cross(&w_s1);
+            let h02 = p_s.cross(&w_s2);
+            
+            local_h[[0,0]] = h00.x; local_h[[0,1]] = h01.x; local_h[[0,2]] = h02.x;
+            local_h[[1,0]] = h00.y; local_h[[1,1]] = h01.y; local_h[[1,2]] = h02.y;
+            local_h[[2,0]] = h00.z; local_h[[2,1]] = h01.z; local_h[[2,2]] = h02.z;
+
+            // 右下: J_trans^T * Omega * J_trans = Omega (そのもの)
+            local_h[[3,3]] = omega[(0,0)]; local_h[[3,4]] = omega[(0,1)]; local_h[[3,5]] = omega[(0,2)];
+            local_h[[4,3]] = omega[(1,0)]; local_h[[4,4]] = omega[(1,1)]; local_h[[4,5]] = omega[(1,2)];
+            local_h[[5,3]] = omega[(2,0)]; local_h[[5,4]] = omega[(2,1)]; local_h[[5,5]] = omega[(2,2)];
+
+            // 右上: J_rot^T * Omega * J_trans = Skew(p)^T * Omega
+            // 行列としては [w_s0, w_s1, w_s2]^T (転置されているため)
+            local_h[[0,3]] = w_s0.x; local_h[[0,4]] = w_s0.y; local_h[[0,5]] = w_s0.z;
+            local_h[[1,3]] = w_s1.x; local_h[[1,4]] = w_s1.y; local_h[[1,5]] = w_s1.z;
+            local_h[[2,3]] = w_s2.x; local_h[[2,4]] = w_s2.y; local_h[[2,5]] = w_s2.z;
+
+            // 左下: 対称行列なので右上の転置
+            local_h[[3,0]] = local_h[[0,3]]; local_h[[3,1]] = local_h[[1,3]]; local_h[[3,2]] = local_h[[2,3]];
+            local_h[[4,0]] = local_h[[0,4]]; local_h[[4,1]] = local_h[[1,4]]; local_h[[4,2]] = local_h[[2,4]];
+            local_h[[5,0]] = local_h[[0,5]]; local_h[[5,1]] = local_h[[1,5]]; local_h[[5,2]] = local_h[[2,5]];
+
+            (local_h, local_b)
+        })
+        .reduce(
+            || (Array2::<f64>::zeros((6, 6)), Array1::<f64>::zeros(6)),
+            |mut a, b| {
+                a.0 = a.0 + b.0;
+                a.1 = a.1 + b.1;
+                a
+            }
+        );
+
+    // H x = b を解く
+    // ここは前のコードと同じ (solve or SVD fallback)
+    let delta = solve_linear_system_6x6(h_sum, b_sum)?;
+    
+    Ok(delta)
+}
+
+// ヘルパー: 6x6 線形方程式を解いて Delta Transform (4x4) を返す
+// (以前の calculate_transformation_pt_to_plane の後半部分と同じロジック)
+fn solve_linear_system_6x6(a: Array2<f64>, b: Array1<f64>) -> Result<Array2<f32>> {
+    let x = a.solve(&b).or_else(|_| {
+         // SVD Fallback (省略または前回のコードを流用)
+         // 簡易的に単位行列を返すかエラーにする
+         Err(anyhow::anyhow!("Linear solve failed"))
+    })?;
+
+    // x = [alpha, beta, gamma, tx, ty, tz]
+    // Rodrigues' formula 等で 4x4 行列化 (前回のコード参照)
+    // ここでは省略していますが、必ず前回のロジックで実装してください
+    let delta_matrix = convert_se3_to_matrix4(x);
+    Ok(delta_matrix)
+}
+
+// [alpha, beta, gamma, tx, ty, tz] -> 4x4 matrix
+fn convert_se3_to_matrix4(x: Array1<f64>) -> Array2<f32> {
+    let alpha = x[0]; let beta = x[1]; let gamma = x[2];
+    let tx = x[3]; let ty = x[4]; let tz = x[5];
+
+    let theta = (alpha*alpha + beta*beta + gamma*gamma).sqrt();
+    let r: Array2<f64>;
+
+    if theta < 1e-9 {
+        r = ndarray::array![
+            [1.0, -gamma, beta],
+            [gamma, 1.0, -alpha],
+            [-beta, alpha, 1.0]
+        ];
+    } else {
+        let k_x = alpha / theta;
+        let k_y = beta / theta;
+        let k_z = gamma / theta;
+        let c = theta.cos();
+        let s = theta.sin();
+        let v = 1.0 - c;
+
+        r = ndarray::array![
+            [k_x*k_x*v + c,     k_x*k_y*v - k_z*s, k_x*k_z*v + k_y*s],
+            [k_x*k_y*v + k_z*s, k_y*k_y*v + c,     k_y*k_z*v - k_x*s],
+            [k_x*k_z*v - k_y*s, k_y*k_z*v + k_x*s, k_z*k_z*v + c]
+        ];
+    }
+
+    ndarray::array![
+        [r[[0,0]] as f32, r[[0,1]] as f32, r[[0,2]] as f32, tx as f32],
+        [r[[1,0]] as f32, r[[1,1]] as f32, r[[1,2]] as f32, ty as f32],
+        [r[[2,0]] as f32, r[[2,1]] as f32, r[[2,2]] as f32, tz as f32],
+        [0.0, 0.0, 0.0, 1.0]
+    ]
 }
 
 /// IMUデータのみを使って全期間の軌跡（回転 + 位置）を計算する
