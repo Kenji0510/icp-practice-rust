@@ -43,7 +43,7 @@ const TOLERANCE: f32 = 0.2;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.4;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/20251212/mid360-pointcloud2-bag-02/mid360";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251205-03";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/20251212/mid360-pointcloud2-bag-02/mid360-imu/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-03/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -357,10 +357,10 @@ fn main() -> Result<()> {
         }
         let elapsed_icp = start_icp_time.elapsed();
 
-        if final_errors > TOLERANCE * 1.5 {
-            println!("Skipped GICP update due to high error: {}", final_errors);
-            continue;
-        }
+        // if final_errors > TOLERANCE * 1.5 {
+        //     println!("Skipped GICP update due to high error: {}", final_errors);
+        //     continue;
+        // }
 
         println!("Final mean pt-to-plane error: {}", final_errors);
 
@@ -1054,46 +1054,45 @@ fn preprocess_point_cloud(
     let n_points = points.len();
     let mut valid_points_flat = Vec::with_capacity(n_points * 3);
 
-    // 時間オフセットの調整用
-    let time_offset = 0.0; 
+    // 1. このフレームの基準となる回転を取得（通常は先頭の点の時刻）
+    // points[0]が最も早い時刻であると仮定
+    let frame_start_time = points[0].timestamp; // 必要に応じて time_offset 加算
+    let start_rotation = get_rotation_at_time(trajectory, frame_start_time);
+    
+    // 基準回転の逆行列を事前に計算（R_start^-1）
+    let start_rotation_inv = start_rotation.inverse();
 
     for p in points {
         let x = p.x as f32;
         let y = p.y as f32;
         let z = p.z as f32;
 
-        // if x.is_nan() || y.is_nan() || z.is_nan() {
-        //     println!("Warning: Found NaN point, skipping.");
-        //     continue;
-        // }
-
-        // 1. 距離フィルタ
+        // 距離フィルタ
         let dist_sq = x * x + y * y + z * z;
         if dist_sq < min_dist * min_dist || dist_sq > max_dist * max_dist {
             continue;
         }
 
-        // 2. 歪み補正 (Deskewing)
-        // 点群が持っている正確な時刻を使用
-        let point_time = p.timestamp + time_offset;
+        // 2. その点の時刻の回転を取得 (R_current)
+        let point_time = p.timestamp; // 必要に応じて time_offset 加算
+        let current_rotation = get_rotation_at_time(trajectory, point_time);
 
-        // その時刻の回転姿勢を取得 (SLERP補間)
-        let rotation = get_rotation_at_time(trajectory, point_time);
+        // 3. 相対回転 (Relative Rotation) を計算
+        // R_relative = R_start^-1 * R_current
+        // これにより、フレーム先頭時刻からその点までの「差分回転」が得られます
+        let relative_rotation = start_rotation_inv * current_rotation;
 
-        // 座標変換 (逆回転させて開始時点の姿勢に戻す)
+        // 4. 座標変換
         let p_vec = Vector3::new(x as f64, y as f64, z as f64);
         
-        // Livoxの場合、スキャン中に動いた分をキャンセル
-        let corrected = rotation.inverse() * p_vec;
+        // ★修正: inverse()せよ、ではなく「相対回転」をそのまま適用
+        // センサーが回転した分だけ、点を同じ方向に回して戻してあげるイメージ
+        let corrected = relative_rotation * p_vec;
 
-        // ★修正: 補正後の値が NaN になっていないかチェック
         if corrected.x.is_nan() || corrected.y.is_nan() || corrected.z.is_nan() {
-            eprintln!("Warning: Deskew resulted in NaN for point ({}, {}, {}), skipping.", x, y, z);
-            // Deskew計算でNaNが出た場合はスキップ
             continue;
         }
 
-        // 3. データの格納
         valid_points_flat.push(corrected.x as f32);
         valid_points_flat.push(corrected.y as f32);
         valid_points_flat.push(corrected.z as f32);
