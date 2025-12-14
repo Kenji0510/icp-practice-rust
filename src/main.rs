@@ -38,12 +38,12 @@ struct FrameData {
 const SAMPLE_SIZE: usize = 1000;
 const TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 50;
-const MAX_ITERATIONS: usize = 10;
+const MAX_ITERATIONS: usize = 20;
 const TOLERANCE: f32 = 0.01;  // Prev: 0.015
-const VOXEL_SIZE: f32 = 0.1;  // 0.2
+const VOXEL_SIZE: f32 = 0.2;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/20251212/mid360-pointcloud2-bag-01/mid360";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-07";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/20251212/mid360-pointcloud2-bag-01/mid360-imu/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-07/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -154,7 +154,7 @@ fn main() -> Result<()> {
         );
 
         // Preprocess for current points: deskew and range filter
-        let mut current_pts_arr = preprocess_point_cloud(
+        let current_pts_arr = preprocess_point_cloud(
             // &current_pts,
             &current_pcd,
             &trajectory,
@@ -214,16 +214,16 @@ fn main() -> Result<()> {
 
 
         // println!("k-d tree built with {} points.", target_pts_arr.nrows());
-        let elapsed_kdtree = start_time.elapsed() - elapsed_preprocess;
+        let elapsed_kdtree = start_time.elapsed();
 
         // Sourceの法線を計算 (数千点なので高速)
         let tx = current_global_pose[[0, 3]];
         let ty = current_global_pose[[1, 3]];
         let tz = current_global_pose[[2, 3]];
-
+        
         let viewpoint = arr1(&[tx, ty, tz]); // ローカル座標系での視点
-        let target_normals = calculate_normals_optimized(&target_pts_arr, &kdtree_target, &viewpoint)?;
-        let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
+        // let target_normals = calculate_normals_optimized(&target_pts_arr, &kdtree_target, &viewpoint)?;
+        // let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
 
         let predicted_pose = last_delta_transform.dot(&current_global_pose);
         // ICPの探索開始位置を予測位置にセット
@@ -333,14 +333,14 @@ fn main() -> Result<()> {
             final_errors = current_fitness_score as f32;
             
             // if i > 0 && error_diff < 1e-6 && translation_diff < 1e-4 {
-            // if i > 0 && error_diff < TOLERANCE as f64 && translation_diff < 1e-4 {
-            //     println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
-            //     break;
-            // }
-            if translation_diff < 1e-3 && rotation_diff < 1e-4 {
-                println!("Converged at iteration {}", i + 1);
+            if i > 0 && error_diff < TOLERANCE as f64 && translation_diff < 1e-4 {
+                println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
                 break;
             }
+            // if translation_diff < 1e-3 && rotation_diff < 1e-4 {
+            //     println!("Converged at iteration {}", i + 1);
+            //     break;
+            // }
 
             prev_fitness_score = current_fitness_score;
         }
@@ -362,8 +362,8 @@ fn main() -> Result<()> {
 
         //「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
-        const MOVE_THRESHOLD: f32 = 0.04; // 2cm以上動いたら
-        const ANGLE_THRESHOLD: f32 = 0.1; // 約0.5度以上回ったら
+        const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
+        const ANGLE_THRESHOLD: f32 = 0.015; // 約0.5度以上回ったら
 
         if i < 10 || translation_diff > MOVE_THRESHOLD {
             println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
@@ -391,7 +391,7 @@ fn main() -> Result<()> {
                     .collect();
 
                 // 2. ローカルマップに追加
-                if i % 2 == 0 {
+                if i % 3 == 0 {
                     local_map_queue.push_back(FrameData {
                         points: aligned_pts.clone(),
                         covariances: aligned_covs.clone(),
@@ -403,33 +403,41 @@ fn main() -> Result<()> {
                 }
 
                 // 3. グローバルマップへの保存
-                if i % 2 == 0 {
-                    global_map_accumulator.push(aligned_pts.to_owned());
+                if i % 3 == 0 {
+                    let n_raw = current_pts_arr.nrows();
+                    let mut raw_homo = Array2::<f32>::ones((n_raw, 4));
+                    raw_homo.slice_mut(s![.., 0..3]).assign(&current_pts_arr);
+                    
+                    // 変換を適用
+                    let transformed_raw = raw_homo.dot(&total_transform.t());
+                    let aligned_raw_pts = transformed_raw.slice(s![.., 0..3]).to_owned();
+                    
+                    global_map_accumulator.push(aligned_raw_pts);
                 }
             }
         }
 
         // Debug
-        if i % 20 == 0 {
+        if i % 50 == 0 {
             // 最後に global_map_accumulator を全部結合して保存
             let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-            let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+            let voxelized_final_map = voxel_downsample_array2(&final_map, 0.1);
             let final_map_points = array2_to_points(&voxelized_final_map);
             let debug_save_path = format!("data/output/icp_map/debug/merged_until_{}.pcd", i);
             final_map_points.save_pcd(&debug_save_path, (0, 255, 0))
                 .context("Failed to save debug merged PCD file")?;
         }
 
-        println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, normals time: {:.3?}, ICP time: {:.3?}",
+        println!("Preprocessing time: {:.3?}, k-d tree time: {:.3?}, ICP time: {:.3?}",
             elapsed_preprocess,
             elapsed_kdtree,
-            elapsed_normals,
+            // elapsed_normals,
             elapsed_icp
         );
 
         total_preprocess_time += elapsed_preprocess;
         total_kdtree_time += elapsed_kdtree;
-        total_normals_time += elapsed_normals;
+        // total_normals_time += elapsed_normals;
         total_icp_time += elapsed_icp;
         processed_frame_count += 1;
     }
@@ -459,7 +467,7 @@ fn main() -> Result<()> {
         println!("\n--- Average Execution Times (over {} frames) ---", processed_frame_count);
         println!("Avg Preprocessing: {:.3?}", avg_preprocess);
         println!("Avg k-d tree:      {:.3?}", avg_kdtree);
-        println!("Avg Normals:       {:.3?}", avg_normals);
+        // println!("Avg Normals:       {:.3?}", avg_normals);
         println!("Avg ICP:           {:.3?}", avg_icp);
     }
 
@@ -476,7 +484,7 @@ fn main() -> Result<()> {
     // let final_points = array2_to_points(&target_pts_arr);
     // let final_save_path = "data/output/icp_map/final_merged.pcd";
     let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-    let voxelized_final_map = voxel_downsample_array2(&final_map, VOXEL_SIZE);
+    let voxelized_final_map = voxel_downsample_array2(&final_map, 0.05);
     let final_map_points = array2_to_points(&voxelized_final_map);
     // final_points.save_pcd(final_save_path, (255, 0, 0))
     //     .context("Failed to save final merged PCD file")?;
@@ -535,29 +543,40 @@ fn voxel_downsample_with_cov(
         let x = pts[[i, 0]];
         let y = pts[[i, 1]];
         let z = pts[[i, 2]];
+        let p_vec = Vector3::new(x, y, z);
 
         let ix = (x / voxel_size).floor() as i32;
         let iy = (y / voxel_size).floor() as i32;
         let iz = (z / voxel_size).floor() as i32;
         let key = (ix, iy, iz);
 
-        // 各ボクセルにつき1点だけ登録（早い者勝ち、または重心に近いもの）
-        grid.entry(key).or_insert(i);
+        grid.entry(key)
+            // 既にボクセルに点がある場合：座標を足し合わせ、カウントを増やす
+            .and_modify(|(sum, count, _)| {
+                *sum += p_vec;
+                *count += 1;
+            })
+            // 初めての点の場合：座標、カウント1、そして共分散を保存
+            .or_insert((p_vec, 1, covs[i]));
     }
 
-    let mut kept_indices: Vec<usize> = grid.values().cloned().collect();
-    kept_indices.sort_unstable();
-
-    // 抽出
-    let n_kept = kept_indices.len();
+    // 抽出（重心を計算）
+    let n_kept = grid.len();
     let mut new_pts = Array2::<f32>::zeros((n_kept, 3));
     let mut new_covs = Vec::with_capacity(n_kept);
 
-    for (k, &orig_idx) in kept_indices.iter().enumerate() {
-        new_pts[[k, 0]] = pts[[orig_idx, 0]];
-        new_pts[[k, 1]] = pts[[orig_idx, 1]];
-        new_pts[[k, 2]] = pts[[orig_idx, 2]];
-        new_covs.push(covs[orig_idx]);
+    // HashMapの順番は不定なので、安定した結果が必要ならキーでソートするなどの工夫が必要ですが、
+    // ここでは単純にイテレートします。
+    for (k, (_, (sum, count, first_cov))) in grid.iter().enumerate() {
+        // 重心 = 合計 / 個数
+        let centroid = sum / (*count as f32);
+        
+        new_pts[[k, 0]] = centroid.x;
+        new_pts[[k, 1]] = centroid.y;
+        new_pts[[k, 2]] = centroid.z;
+        
+        // 共分散は「そのボクセルを代表する鋭い分布」として、最初の点のものを採用
+        new_covs.push(*first_cov);
     }
 
     (new_pts, new_covs)
