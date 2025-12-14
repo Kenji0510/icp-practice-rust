@@ -29,21 +29,21 @@ struct FrameData {
     covariances: Vec<Matrix3<f64>>,
 }
 
-// const WIDTH: f64 = 10.0;
-// const HEIGHT: f64 = 5.0;
-// const ROTATION_ANGLE_DEG: f64 = 25.0;
-// const TRANSLATION_X: f64 = 5.0;
-// const TRANSLATION_Y: f64 = 3.0;
-// const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
+// const SAMPLE_SIZE: usize = 1500;
+// const TRIM_PERCENTAGE: f64 = 1.0;
+// const K_NEIGHBORS: usize = 6;
+// const MAX_ITERATIONS: usize = 10;
+// const TOLERANCE: f32 = 0.2;  // Prev: 0.015
+// const VOXEL_SIZE: f32 = 0.4;  // 0.2
 const SAMPLE_SIZE: usize = 1000;
 const TRIM_PERCENTAGE: f64 = 1.0;
-const K_NEIGHBORS: usize = 50;
-const MAX_ITERATIONS: usize = 20;
-const TOLERANCE: f32 = 0.01;  // Prev: 0.015
-const VOXEL_SIZE: f32 = 0.2;  // 0.2
+const K_NEIGHBORS: usize = 10;
+const MAX_ITERATIONS: usize = 10;
+const TOLERANCE: f32 = 0.2;  // Prev: 0.015
+const VOXEL_SIZE: f32 = 0.4;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-07";
+    let target_pcd_dir = "data/input/20251212/mid360-pointcloud2-bag-02/mid360";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-07/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/20251212/mid360-pointcloud2-bag-02/mid360-imu/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -86,7 +86,7 @@ fn main() -> Result<()> {
     // Local map queue
     // let mut local_map_queue: VecDeque<Array2<f32>> = VecDeque::new();
     let mut local_map_queue: VecDeque<FrameData> = VecDeque::new();
-    const LOCAL_MAP_SIZE: usize = 20;
+    const LOCAL_MAP_SIZE: usize = 10;
 
     // Global map accumulator
     let mut global_map_accumulator: Vec<Array2<f32>> = Vec::new();
@@ -185,6 +185,10 @@ fn main() -> Result<()> {
             &source_covs, 
             VOXEL_SIZE
         );
+        println!("Downsampled source points from {} to {} points.",
+            current_pts_arr.nrows(),
+            downsampled_pts.nrows()
+        );
 
         // !--- End of Downsampling ---!
 
@@ -195,6 +199,13 @@ fn main() -> Result<()> {
         } else {
             flatten_local_map(&local_map_queue)?
         };
+
+        // Downsample target points and covariances together
+        let (target_pts_arr, target_covs) = voxel_downsample_with_cov(
+            &target_pts_arr, 
+            &target_covs, 
+            VOXEL_SIZE
+        );
 
         let target_points_vec: Vec<[f32; 3]> = target_pts_arr.outer_iter()
         .map(|row| [row[0], row[1], row[2]])
@@ -333,7 +344,7 @@ fn main() -> Result<()> {
             final_errors = current_fitness_score as f32;
             
             // if i > 0 && error_diff < 1e-6 && translation_diff < 1e-4 {
-            if i > 0 && error_diff < TOLERANCE as f64 && translation_diff < 1e-4 {
+            if final_errors < TOLERANCE {
                 println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
                 break;
             }
@@ -345,6 +356,11 @@ fn main() -> Result<()> {
             prev_fitness_score = current_fitness_score;
         }
         let elapsed_icp = start_icp_time.elapsed();
+
+        if final_errors > TOLERANCE * 1.5 {
+            println!("Skipped GICP update due to high error: {}", final_errors);
+            continue;
+        }
 
         println!("Final mean pt-to-plane error: {}", final_errors);
 
@@ -362,10 +378,12 @@ fn main() -> Result<()> {
 
         //「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
-        const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
-        const ANGLE_THRESHOLD: f32 = 0.015; // 約0.5度以上回ったら
+        const MOVE_THRESHOLD_MIN: f32 = 0.02; // 2cm以上動いたら
+        const MOVE_THRESHOLD_MAX: f32 = 0.80; // 40cm以上動いたら
+        const ANGLE_THRESHOLD: f32 = 0.050; // 約0.5度以上回ったら
+        // const ANGLE_THRESHOLD: f32 = 0.015; // 約0.5度以上回ったら
 
-        if i < 10 || translation_diff > MOVE_THRESHOLD {
+        if i < 10 || (translation_diff < MOVE_THRESHOLD_MAX && translation_diff > MOVE_THRESHOLD_MIN) {
             println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
             
             if rotation_diff < ANGLE_THRESHOLD {
@@ -391,7 +409,7 @@ fn main() -> Result<()> {
                     .collect();
 
                 // 2. ローカルマップに追加
-                if i % 3 == 0 {
+                if i % 2 == 0 {
                     local_map_queue.push_back(FrameData {
                         points: aligned_pts.clone(),
                         covariances: aligned_covs.clone(),
@@ -608,7 +626,7 @@ fn compute_covariances(
     kdtree: &kiddo::ImmutableKdTree<f32, 3>,
 ) -> Vec<Matrix3<f64>> {
     let n_points = pts.nrows();
-    let k_neighbors = NonZero::new(20).unwrap();
+    let k_neighbors = NonZero::new(K_NEIGHBORS).unwrap();
 
     (0..n_points).into_par_iter().map(|i| {
         let qx = pts[[i, 0]];
@@ -654,6 +672,14 @@ fn compute_covariances(
         vals[min_idx] = 1e-3;     // 法線方向を薄くする
         vals[pairs[1].1] = 1.0;
         vals[pairs[2].1] = 1.0;
+
+        // let min_idx = pairs[0].1; // 法線（厚み）
+        // let mid_idx = pairs[1].1; // 縦方向（高さ）
+        // let max_idx = pairs[2].1; // 横方向（幅）
+
+        // vals[min_idx] = 1e-3;     // 法線方向を非常に薄く
+        // vals[mid_idx] = 0.7;     // 縦方向を薄く
+        // vals[max_idx] = 1.0;      // 横方向はやや薄
 
         // C = R * S * R^T
         let regularized_cov = rot * Matrix3::from_diagonal(&vals) * rot.transpose();
