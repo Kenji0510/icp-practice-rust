@@ -35,11 +35,11 @@ struct FrameData {
 // const TRANSLATION_X: f64 = 5.0;
 // const TRANSLATION_Y: f64 = 3.0;
 // const NOISE_LEVEL: f64 = 0.1; // ノイズを少し強めに
-const SAMPLE_SIZE: usize = 1000;
+const SAMPLE_SIZE: usize = 300;
 const TRIM_PERCENTAGE: f64 = 1.0;
-const K_NEIGHBORS: usize = 50;
-const MAX_ITERATIONS: usize = 20;
-const TOLERANCE: f32 = 0.01;  // Prev: 0.015
+const K_NEIGHBORS: usize = 10;
+const MAX_ITERATIONS: usize = 8;
+const TOLERANCE: f32 = 0.10;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.2;  // 0.2
 
 fn main() -> Result<()> {
@@ -196,10 +196,18 @@ fn main() -> Result<()> {
             flatten_local_map(&local_map_queue)?
         };
 
+        // Downsample target points and covariances together
+        let (target_pts_arr, target_covs) = voxel_downsample_with_cov(
+            &target_pts_arr, 
+            &target_covs, 
+            0.2
+        );
+
         let target_points_vec: Vec<[f32; 3]> = target_pts_arr.outer_iter()
         .map(|row| [row[0], row[1], row[2]])
         .collect();
         let kdtree_target = kiddo::ImmutableKdTree::new_from_slice(&target_points_vec);
+
 
         // Concatenate local map points
         // let local_map_views: Vec<_> = local_map_queue.iter()
@@ -227,7 +235,7 @@ fn main() -> Result<()> {
 
         let predicted_pose = last_delta_transform.dot(&current_global_pose);
         // ICPの探索開始位置を予測位置にセット
-        let mut total_transform = predicted_pose;
+        let mut total_transform = predicted_pose.clone();
 
         // Copy source points for current frame
         let source_points_num = current_pts_arr.nrows();
@@ -316,6 +324,39 @@ fn main() -> Result<()> {
                 &total_transform // 現在の姿勢 (Rの計算に必要)
             )?;
 
+
+            // // 1. 今回のステップでの移動ベクトル
+            // let dx = delta_transform[[0, 3]];
+            // let dy = delta_transform[[1, 3]];
+            // let dz = delta_transform[[2, 3]];
+            // let step_movement = Vector3::new(dx as f64, dy as f64, dz as f64);
+            // let step_dist = step_movement.norm();
+            
+            // let current_pos = total_transform.slice(s![0..3, 3]);
+            // let pred_pos = predicted_pose.slice(s![0..3, 3]); // 前回のループ終了時に計算しておく
+            
+            // let dist_from_prediction = (
+            //     (current_pos[0 as usize] - pred_pos[0 as usize]).powi(2) +
+            //     (current_pos[1 as usize] - pred_pos[1 as usize]).powi(2) +
+            //     (current_pos[2 as usize] - pred_pos[2 as usize]).powi(2)
+            // ).sqrt();
+
+            // // 閾値設定 (例: 予測から20cm以上離れるのはおかしい)
+            // const MAX_DEVIATION: f32 = 0.4;
+            
+            // // 判定 A: 予測範囲を逸脱しそうなら、ブレーキをかける
+            // let mut dampened_delta = delta_transform.clone();
+            
+            // if dist_from_prediction > MAX_DEVIATION {
+            //     println!("Warning: Solver drifting too far! Dampening step.");
+            //     // 更新量を極端に小さくする（ゆっくり戻らせる）
+            //     dampened_delta = convert_se3_to_matrix4(
+            //         convert_matrix4_to_se3(&delta_transform) * 0.1 // 10%しか適用しない
+            //     );
+            // }
+
+            // total_transform = dampened_delta.dot(&total_transform);
+
             // --- 2f. "総" 変換行列を更新 ---
             // T_k+1 = DeltaT * T_k
             total_transform = delta_transform.dot(&total_transform);
@@ -333,7 +374,8 @@ fn main() -> Result<()> {
             final_errors = current_fitness_score as f32;
             
             // if i > 0 && error_diff < 1e-6 && translation_diff < 1e-4 {
-            if i > 0 && error_diff < TOLERANCE as f64 && translation_diff < 1e-4 {
+            // if i > 0 && error_diff < TOLERANCE as f64 && translation_diff < 1e-4 {
+            if final_errors < TOLERANCE {
                 println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
                 break;
             }
@@ -362,10 +404,11 @@ fn main() -> Result<()> {
 
         //「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
         // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
-        const MOVE_THRESHOLD: f32 = 0.02; // 2cm以上動いたら
+        const MOVE_THRESHOLD_MIN: f32 = 0.02; // 2cm以上動いたら
+        const MOVE_THRESHOLD_MAX: f32 = 0.80; // 40cm以上動いたら
         const ANGLE_THRESHOLD: f32 = 0.015; // 約0.5度以上回ったら
 
-        if i < 10 || translation_diff > MOVE_THRESHOLD {
+        if i < 10 || translation_diff < MOVE_THRESHOLD_MAX && translation_diff > MOVE_THRESHOLD_MIN {
             println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
             
             if rotation_diff < ANGLE_THRESHOLD {
@@ -391,7 +434,7 @@ fn main() -> Result<()> {
                     .collect();
 
                 // 2. ローカルマップに追加
-                if i % 3 == 0 {
+                if i % 2 == 0 {
                     local_map_queue.push_back(FrameData {
                         points: aligned_pts.clone(),
                         covariances: aligned_covs.clone(),
@@ -494,6 +537,46 @@ fn main() -> Result<()> {
     println!("Saved final merged point cloud to {}", final_save_path);
     
     Ok(())
+}
+
+fn convert_matrix4_to_se3(transform: &Array2<f32>) -> Array1<f64> {
+    let mut se3 = Array1::<f64>::zeros(6);
+
+    // 1. 平行移動成分 (t)
+    se3[3] = transform[[0, 3]] as f64;
+    se3[4] = transform[[1, 3]] as f64;
+    se3[5] = transform[[2, 3]] as f64;
+
+    // 2. 回転成分 (R -> omega)
+    // トレースから回転角 theta を計算
+    let tr = transform[[0, 0]] + transform[[1, 1]] + transform[[2, 2]];
+    let arg = ((tr as f64 - 1.0) / 2.0).clamp(-1.0, 1.0);
+    let theta = arg.acos();
+
+    if theta < 1e-7 {
+        // 回転が非常に小さい場合：近似計算 (0割りを防ぐ)
+        // omega = 1/2 * (R - R^T) の非対角成分
+        // 近似: 2*sin(theta)/theta -> 2
+        // R_diff = 2 * [0, -wz, wy; ...]
+        
+        // 反対称成分を取り出す
+        // r32 - r23
+        se3[0] = (transform[[2, 1]] - transform[[1, 2]]) as f64 / 2.0;
+        // r13 - r31
+        se3[1] = (transform[[0, 2]] - transform[[2, 0]]) as f64 / 2.0;
+        // r21 - r12
+        se3[2] = (transform[[1, 0]] - transform[[0, 1]]) as f64 / 2.0;
+    } else {
+        // 通常のロドリゲスの公式の逆変換
+        // omega = theta / (2 * sin(theta)) * (R - R^T)
+        let factor = theta / (2.0 * theta.sin());
+        
+        se3[0] = factor * (transform[[2, 1]] - transform[[1, 2]]) as f64;
+        se3[1] = factor * (transform[[0, 2]] - transform[[2, 0]]) as f64;
+        se3[2] = factor * (transform[[1, 0]] - transform[[0, 1]]) as f64;
+    }
+
+    se3
 }
 
 fn flatten_local_map(
@@ -608,7 +691,7 @@ fn compute_covariances(
     kdtree: &kiddo::ImmutableKdTree<f32, 3>,
 ) -> Vec<Matrix3<f64>> {
     let n_points = pts.nrows();
-    let k_neighbors = NonZero::new(20).unwrap();
+    let k_neighbors = NonZero::new(K_NEIGHBORS).unwrap();
 
     (0..n_points).into_par_iter().map(|i| {
         let qx = pts[[i, 0]];
@@ -654,6 +737,14 @@ fn compute_covariances(
         vals[min_idx] = 1e-3;     // 法線方向を薄くする
         vals[pairs[1].1] = 1.0;
         vals[pairs[2].1] = 1.0;
+
+        // let min_idx = pairs[0].1; // 法線（厚み）
+        // let mid_idx = pairs[1].1; // 縦方向（高さ）
+        // let max_idx = pairs[2].1; // 横方向（幅）
+
+        // vals[min_idx] = 1e-3;     // 法線方向を非常に薄く
+        // vals[mid_idx] = 0.01;     // 縦方向を薄く
+        // vals[max_idx] = 0.5;      // 横方向はやや薄
 
         // C = R * S * R^T
         let regularized_cov = rot * Matrix3::from_diagonal(&vals) * rot.transpose();
