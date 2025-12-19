@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use anyhow::{Result, Context};
-use icp_practice::operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, save_pcd, save_pcd_with_normals};
+use icp_practice::operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, load_pcd_xyzrgb, save_pcd, save_pcd_with_normals};
 use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
@@ -21,10 +21,12 @@ const DEFAULT_TRIM_PERCENTAGE: f64 = 1.0; // 必要に応じて調整 (例: 0.90
 const K_NEIGHBORS: usize = 15;
 
 fn main() -> Result<()> {
-    let target_pcd_file_path = "data/input/H927/lab-room_voxel_025_xyz_only.pcd";
+    // let target_pcd_file_path = "data/input/H927/lab-room_voxel_025_xyz_only.pcd";
+    let target_pcd_file_path = "data/input/H927/h927-ok-20251212_v-025.pcd";
     let source_pcd_file_path = "data/input/H927/vggt-data_output_voxel_025_xyz_only.pcd";
 
-    let target_d = load_pcd_xyz(target_pcd_file_path).context("Failed to load Target PCD")?;
+    // let target_d = load_pcd_xyz(target_pcd_file_path).context("Failed to load Target PCD")?;
+    let target_d = load_pcd_xyzrgb(target_pcd_file_path).context("Failed to load Target PCD")?;
     let source_d = load_pcd_xyz(source_pcd_file_path).context("Failed to load Source PCD")?;
 
     let target_pts = Points::new(target_d);
@@ -92,20 +94,23 @@ fn main() -> Result<()> {
 
     // 2. 反転・回転の候補を作成
     // candidate_original は「そのまま」のデータ
-    let (candidate_lr, candidate_ud, candidate_rot) = reverse_pcd(&base_aligned_pts);
+    let (candidate_lr, candidate_ud, candidate_rot_z, candidate_rot_y, candidate_rot_x) = reverse_pcd(&base_aligned_pts);
 
     // 比較ループ用のベクターを作成
     // (ラベル, 点群データ, 元のRMSE)
     let candidates = vec![
-        ("Original", base_aligned_pts, final_rmse), 
-        ("LR Flip",  candidate_lr,    f64::MAX), // RMSEはこれから計算
-        ("UD Flip",  candidate_ud,    f64::MAX),
-        ("Rot 180",  candidate_rot,   f64::MAX),
+        ("Original",    base_aligned_pts,  final_rmse), 
+        ("LR Flip",     candidate_lr,      f64::MAX),
+        ("UD Flip",     candidate_ud,      f64::MAX),
+        ("Rot 180 Z",   candidate_rot_z,   f64::MAX),
+        ("Rot 180 Y",   candidate_rot_y,   f64::MAX),
+        ("Rot 180 X",   candidate_rot_x,   f64::MAX),
     ];
 
     let mut best_rmse = f64::MAX;
     let mut best_label = String::from("None");
     let mut best_final_pts = Array2::<f64>::zeros((0, 3)); // 最終的な点群保持用
+    let mut best_tf = Array2::<f64>::eye(4);
 
     println!("--- Starting Hypothesis Verification ---");
 
@@ -144,11 +149,13 @@ fn main() -> Result<()> {
             best_rmse = rmse;
             best_label = label.to_string();
             best_final_pts = final_pts;
+            best_tf = final_transform.clone();
         }
     }
 
     println!("----------------------------------------");
     println!("Best: {} (RMSE: {:.6})", best_label, best_rmse);
+    println!("Best Transform:\n{:?}", best_tf);
 
     // plot_points(&source_pts, &target_pts, &current_source_pts, "icp_final.png", "Final State").unwrap();
 
@@ -169,13 +176,13 @@ fn main() -> Result<()> {
     all_points.extend(colored_transformed_source_pts.clone());
 
     // Save each point clouds
-    let save_path = "data/output/H927-matching/icp_aligned_all_result_v-025.pcd";
+    let save_path = "data/output/Rentallab-matching/icp_aligned_all_result_v-025.pcd";
     match save_pcd(&all_points, save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
     }
 
-    let save_path = "data/output/H927-matching/icp_aligned_result_v-025.pcd";
+    let save_path = "data/output/Rentallab-matching/icp_aligned_result_v-025.pcd";
     match save_pcd(&all_points_without_centering, save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
@@ -186,27 +193,31 @@ fn main() -> Result<()> {
 
 fn reverse_pcd(
     points: &Array2<f64>
-) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
-    // 1. 左右反転 (Left-Right Mirror)
-    // 一般的にX軸が進行方向の場合、Y軸を反転させると左右鏡像になります。
-    // (x, y, z) -> (x, -y, z)
+) -> (Array2<f64>, Array2<f64>, Array2<f64>, Array2<f64>, Array2<f64>) {
+    // 1. 左右反転 (Y軸反転 - YZ平面に対する鏡像)
     let mut mirror_lr = points.clone();
     mirror_lr.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
 
-    // 2. 上下反転 (Up-Down Mirror relative to XY plane)
-    // XY平面に対して反転＝Z軸の値を反転させます。
-    // (x, y, z) -> (x, y, -z)
+    // 2. 上下反転 (Z軸反転 - XY平面に対する鏡像)
     let mut mirror_ud = points.clone();
     mirror_ud.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
 
-    // 3. 180度回転 (Rotate 180 deg around Z axis)
-    // XY平面上での180度回転＝XとYの両方の符号を反転させます。
-    // (x, y, z) -> (-x, -y, z)
-    let mut rotate_180 = points.clone();
-    rotate_180.slice_mut(s![.., 0]).mapv_inplace(|x| -x);
-    rotate_180.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
+    // 3. Z軸周りの180度回転 (X-Y平面上での180度回転)
+    let mut rotate_180_z = points.clone();
+    rotate_180_z.slice_mut(s![.., 0]).mapv_inplace(|x| -x);
+    rotate_180_z.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
 
-    (mirror_lr, mirror_ud, rotate_180)
+    // 4. Y軸周りの180度回転 (前後反転)
+    let mut rotate_180_y = points.clone();
+    rotate_180_y.slice_mut(s![.., 0]).mapv_inplace(|x| -x);
+    rotate_180_y.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
+
+    // 5. X軸周りの180度回転 (天地前後反転)
+    let mut rotate_180_x = points.clone();
+    rotate_180_x.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
+    rotate_180_x.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
+
+    (mirror_lr, mirror_ud, rotate_180_z, rotate_180_y, rotate_180_x)
 }
 
 fn perform_icp_point_to_plane(
