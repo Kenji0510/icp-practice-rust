@@ -35,15 +35,15 @@ struct FrameData {
 // const MAX_ITERATIONS: usize = 10;
 // const TOLERANCE: f32 = 0.2;  // Prev: 0.015
 // const VOXEL_SIZE: f32 = 0.4;  // 0.2
-const SAMPLE_SIZE: usize = 1000;
+const SAMPLE_SIZE: usize = 400;
 const TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 10;
 const MAX_ITERATIONS: usize = 10;
-const TOLERANCE: f32 = 0.2;  // Prev: 0.015
-const VOXEL_SIZE: f32 = 0.4;  // 0.2
+const TOLERANCE: f32 = 0.1;  // Prev: 0.015
+const VOXEL_SIZE: f32 = 0.2;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251205-03";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-03";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-03/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -344,10 +344,10 @@ fn main() -> Result<()> {
             final_errors = current_fitness_score as f32;
             
             // if i > 0 && error_diff < 1e-6 && translation_diff < 1e-4 {
-            if final_errors < TOLERANCE {
-                println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
-                break;
-            }
+            // if final_errors < TOLERANCE {
+            //     println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
+            //     break;
+            // }
             // if translation_diff < 1e-3 && rotation_diff < 1e-4 {
             //     println!("Converged at iteration {}", i + 1);
             //     break;
@@ -671,7 +671,7 @@ fn compute_covariances(
         let min_idx = pairs[0].1; // 最小固有値のインデックス
         vals[min_idx] = 1e-3;     // 法線方向を薄くする
         vals[pairs[1].1] = 1.0;
-        vals[pairs[2].1] = 1.0;
+        vals[pairs[2].1] = 5.0;
 
         // let min_idx = pairs[0].1; // 法線（厚み）
         // let mid_idx = pairs[1].1; // 縦方向（高さ）
