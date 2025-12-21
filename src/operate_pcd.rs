@@ -165,6 +165,35 @@ impl Points {
 
         Ok(())
     }
+
+    pub fn save_pcd_xyz(
+        &self,
+        file_path: &str,
+    ) -> Result<()> {
+        let colored_points: Vec<PointXYZ> = self.points.iter()
+            .map(|p| PointXYZ {
+                x: p.x,
+                y: p.y,
+                z: p.z,
+            })
+            .collect();
+
+        let mut writer = pcd_rs::WriterInit {
+            width: 1,
+            height: colored_points.len() as u64,
+            viewpoint: Default::default(),
+            data_kind: pcd_rs::DataKind::Ascii,
+            schema: None,
+        }
+        .create(file_path)?;
+        
+        for point in &colored_points {
+            writer.push(point)?;
+        }
+        writer.finish()?;
+
+        Ok(())
+    }
 }
 
 

@@ -43,7 +43,7 @@ const TOLERANCE: f32 = 0.05;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.2;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251205-01";
+    let target_pcd_dir = "data/input/20251219-simizu/mid360";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251205-01/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/20251219-simizu/mid360-imu/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -448,7 +448,7 @@ fn main() -> Result<()> {
         let r_angle = ((tr - 1.0)/2.0).clamp(-1.0, 1.0).acos();
 
         // 閾値: 10cm移動 OR 3度回転
-        const KEYFRAME_DIST: f32 = 0.1; 
+        const KEYFRAME_DIST: f32 = 0.01; 
         const KEYFRAME_ANGLE: f32 = 0.05; 
 
         // 初期の10フレームは無条件で更新してマップを育てる
@@ -498,6 +498,36 @@ fn main() -> Result<()> {
 
         // Trajectory Log
         icp_trajectory_log.push(extract_pose_from_matrix(current_frame_timestamp, &current_global_pose));
+
+
+        // 20251219
+        // source点群をグローバル座標系に変換
+        let n_source = current_pts_arr.nrows();
+        let mut source_homo = Array2::<f32>::ones((n_source, 4));
+        source_homo.slice_mut(s![.., 0..3]).assign(&current_pts_arr);
+        
+        // 最終的な位置合わせ: P_global = T_final * P_local
+        let aligned_homo = source_homo.dot(&current_global_pose.t());
+        let aligned_pts = aligned_homo.slice(s![.., 0..3]).to_owned();
+        
+        // Array2 -> Points に変換
+        let aligned_points = array2_to_points(&aligned_pts);
+        
+        // 保存先パス
+        let aligned_save_path = format!("data/output/gicp-map/20251219/mid360/frame_{}.pcd", i);
+        
+        // ディレクトリが存在しない場合は作成
+        // if i == 5 {
+        //     std::fs::create_dir_all("data/output/gicp-map/20251219/mid360")
+        //         .context("Failed to create aligned_frames directory")?;
+        // }
+
+        // 保存 (緑色で着色)
+        aligned_points.save_pcd_xyz(&aligned_save_path)
+            .with_context(|| format!("Failed to save aligned frame {}", i))?;
+        
+        println!("Saved aligned frame {} to {}", i, aligned_save_path);
+
 
         // Debug
         if i % 50 == 0 {
@@ -566,7 +596,7 @@ fn main() -> Result<()> {
     // let final_points = array2_to_points(&target_pts_arr);
     // let final_save_path = "data/output/icp_map/final_merged.pcd";
     let final_map = ndarray::concatenate(Axis(0), &global_map_accumulator.iter().map(|a| a.view()).collect::<Vec<_>>())?;
-    let voxelized_final_map = voxel_downsample_array2(&final_map, 0.05);
+    let voxelized_final_map = voxel_downsample_array2(&final_map, 0.01);
     let final_map_points = array2_to_points(&voxelized_final_map);
     // final_points.save_pcd(final_save_path, (255, 0, 0))
     //     .context("Failed to save final merged PCD file")?;
