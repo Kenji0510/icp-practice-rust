@@ -35,15 +35,15 @@ struct FrameData {
 // const MAX_ITERATIONS: usize = 10;
 // const TOLERANCE: f32 = 0.2;  // Prev: 0.015
 // const VOXEL_SIZE: f32 = 0.4;  // 0.2
-const SAMPLE_SIZE: usize = 400;
+const SAMPLE_SIZE: usize = 1500;
 const TRIM_PERCENTAGE: f64 = 1.0;
-const K_NEIGHBORS: usize = 10;
-const MAX_ITERATIONS: usize = 10;
-const TOLERANCE: f32 = 0.1;  // Prev: 0.015
+const K_NEIGHBORS: usize = 20;
+const MAX_ITERATIONS: usize = 15;
+const TOLERANCE: f32 = 0.05;  // Prev: 0.015
 const VOXEL_SIZE: f32 = 0.2;  // 0.2
 
 fn main() -> Result<()> {
-    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251125-03";
+    let target_pcd_dir = "data/input/mid360/pcd/mid360-20251205-01";
     let pcd_paths = match load_pcd_files(target_pcd_dir) {
         Ok(paths) => paths,
         Err(e) => {
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("Found {} PCD files in {}", pcd_paths.len(), target_pcd_dir);
 
     println!("Loading IMU JSON...");
-    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
+    let imu_samples = load_and_flatten_imu_json("data/input/mid360/imu/mid360-imu-20251205-01/imu_data.json")
     // let imu_samples = load_imu_json("data/input/mid360/imu/mid360-imu-20251125-03/imu_data.json")
         .context("Failed to load IMU JSON data")?;
     println!("Loaded {} IMU samples.", imu_samples.len());
@@ -82,11 +82,13 @@ fn main() -> Result<()> {
 
     let mut current_global_pose = Array2::<f32>::eye(4);
     let mut last_delta_transform = Array2::<f32>::eye(4);
+    let mut current_velocity = Vector3::<f64>::new(0.0, 0.0, 0.0);
+    let mut last_frame_timestamp = base_timestamp;
 
     // Local map queue
     // let mut local_map_queue: VecDeque<Array2<f32>> = VecDeque::new();
     let mut local_map_queue: VecDeque<FrameData> = VecDeque::new();
-    const LOCAL_MAP_SIZE: usize = 10;
+    const LOCAL_MAP_SIZE: usize = 20;
 
     // Global map accumulator
     let mut global_map_accumulator: Vec<Array2<f32>> = Vec::new();
@@ -125,17 +127,68 @@ fn main() -> Result<()> {
 
         if current_pcd.is_empty() { continue; }
 
+        let min_timestamp = current_pcd.iter()
+            .map(|p| p.timestamp).fold(f64::INFINITY, f64::min);
+
         // =================================================================
         // ★追加: タイムスタンプの単位変換 (ナノ秒 -> 秒)
         // =================================================================
         // 最初の点のタイムスタンプをチェック
         // 1e16 (10,000,000,000,000,000) 以上ならナノ秒とみなして変換
-        if current_pcd[0].timestamp > 1e16 {
-            // println!("Converting timestamps from nanoseconds to seconds...");
-            for p in &mut current_pcd {
-                p.timestamp /= 1_000_000_000.0;
-            }
+        let current_frame_timestamp = if min_timestamp > 1e16 {
+             min_timestamp / 1_000_000_000.0 
+        } else { 
+            min_timestamp 
+        };
+
+        if i == 1 { // i=0はスキップされているので実質最初のループ
+             last_frame_timestamp = current_frame_timestamp;
         }
+
+        let (predicted_pose, predicted_velocity) = predict_pose_by_imu(
+            &current_global_pose,  // 前回の確定位置
+            &current_velocity,     // 前回の速度
+            last_frame_timestamp,  // 前回の時刻
+            current_frame_timestamp, // 今回の時刻
+            &imu_samples           // IMUデータ全体
+        );
+
+        // ★予測結果の表示を追加
+        let pred_tx = predicted_pose[[0, 3]];
+        let pred_ty = predicted_pose[[1, 3]];
+        let pred_tz = predicted_pose[[2, 3]];
+
+        // 前回からの移動距離
+        let delta_x = pred_tx - current_global_pose[[0, 3]];
+        let delta_y = pred_ty - current_global_pose[[1, 3]];
+        let delta_z = pred_tz - current_global_pose[[2, 3]];
+        let predicted_distance = (delta_x*delta_x + delta_y*delta_y + delta_z*delta_z).sqrt();
+
+        // 回転角度の計算
+        let pred_mat3 = Matrix3::new(
+            predicted_pose[[0, 0]] as f64, predicted_pose[[0, 1]] as f64, predicted_pose[[0, 2]] as f64,
+            predicted_pose[[1, 0]] as f64, predicted_pose[[1, 1]] as f64, predicted_pose[[1, 2]] as f64,
+            predicted_pose[[2, 0]] as f64, predicted_pose[[2, 1]] as f64, predicted_pose[[2, 2]] as f64,
+        );
+        let curr_mat3 = Matrix3::new(
+            current_global_pose[[0, 0]] as f64, current_global_pose[[0, 1]] as f64, current_global_pose[[0, 2]] as f64,
+            current_global_pose[[1, 0]] as f64, current_global_pose[[1, 1]] as f64, current_global_pose[[1, 2]] as f64,
+            current_global_pose[[2, 0]] as f64, current_global_pose[[2, 1]] as f64, current_global_pose[[2, 2]] as f64,
+        );
+
+        let pred_quat = UnitQuaternion::from_matrix(&pred_mat3);
+        let curr_quat = UnitQuaternion::from_matrix(&curr_mat3);
+        let delta_quat = curr_quat.inverse() * pred_quat;
+        let predicted_angle = delta_quat.angle();
+
+        println!("IMU Prediction:");
+        println!("  Position: [{:.4}, {:.4}, {:.4}]", pred_tx, pred_ty, pred_tz);
+        println!("  Delta: [{:.4}, {:.4}, {:.4}] (distance: {:.4}m)", 
+            delta_x, delta_y, delta_z, predicted_distance);
+        println!("  Rotation angle: {:.4} rad ({:.2}°)", 
+            predicted_angle, predicted_angle.to_degrees());
+        println!("  Velocity: [{:.4}, {:.4}, {:.4}] m/s", 
+            predicted_velocity.x, predicted_velocity.y, predicted_velocity.z);
 
         let start_time = std::time::Instant::now();
         
@@ -236,9 +289,9 @@ fn main() -> Result<()> {
         // let target_normals = calculate_normals_optimized(&target_pts_arr, &kdtree_target, &viewpoint)?;
         // let elapsed_normals = start_time.elapsed() - elapsed_kdtree - elapsed_preprocess;
 
-        let predicted_pose = last_delta_transform.dot(&current_global_pose);
+        // let predicted_pose = last_delta_transform.dot(&current_global_pose);
         // ICPの探索開始位置を予測位置にセット
-        let mut total_transform = predicted_pose;
+        let mut total_transform = predicted_pose.clone();
 
         // Copy source points for current frame
         let source_points_num = current_pts_arr.nrows();
@@ -256,17 +309,19 @@ fn main() -> Result<()> {
             let current_transformed_homogeneous = original_source_pts.dot(&total_transform.t());
             let current_source_pts_arr = current_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
 
-            let (sampled_source_pts, sampled_source_indices) = 
-                if source_points_num <= SAMPLE_SIZE {
-                    (current_source_pts_arr.clone(), source_indices.clone())
-                } else {
-                    let indices = source_indices.as_slice()
-                        .choose_multiple(&mut rng, SAMPLE_SIZE)
-                        .cloned()
-                        .collect::<Vec<usize>>();
+            // let (sampled_source_pts, sampled_source_indices) = 
+            //     if source_points_num <= SAMPLE_SIZE {
+            //         (current_source_pts_arr.clone(), source_indices.clone())
+            //     } else {
+            //         let indices = source_indices.as_slice()
+            //             .choose_multiple(&mut rng, SAMPLE_SIZE)
+            //             .cloned()
+            //             .collect::<Vec<usize>>();
 
-                    (current_source_pts_arr.select(Axis(0), &indices), indices)
-                };
+            //         (current_source_pts_arr.select(Axis(0), &indices), indices)
+            //     };
+
+            let (sampled_source_pts, sampled_source_indices) = (current_source_pts_arr.clone(), source_indices.clone());
 
             // --- 2c. `find_closest_pairs_kdtree` の呼び出し ---
             let (matched_target_pts, matched_target_indices, distance_sq) = 
@@ -344,10 +399,10 @@ fn main() -> Result<()> {
             final_errors = current_fitness_score as f32;
             
             // if i > 0 && error_diff < 1e-6 && translation_diff < 1e-4 {
-            // if final_errors < TOLERANCE {
-            //     println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
-            //     break;
-            // }
+            if final_errors < TOLERANCE {
+                println!("Converged at iter {}: RMSE {:.6}", i+1, current_fitness_score);
+                break;
+            }
             // if translation_diff < 1e-3 && rotation_diff < 1e-4 {
             //     println!("Converged at iteration {}", i + 1);
             //     break;
@@ -362,78 +417,87 @@ fn main() -> Result<()> {
         //     continue;
         // }
 
-        println!("Final mean pt-to-plane error: {}", final_errors);
+        println!("Frame {}: Error = {:.4}", i, final_errors);
 
-        let new_delta = total_transform.dot(&current_global_pose.inv().unwrap());
-
-        // 移動量を計算 (回転行列のトレースから角度を、平行移動ベクトルから距離を算出)
-        let translation_diff = new_delta.slice(s![0..3, 3]).norm(); // 移動距離 (m)
-        // let trace = new_delta.diag().sum();
-        let trace_3x3 = new_delta[[0, 0]] + new_delta[[1, 1]] + new_delta[[2, 2]];
-        let cos_theta = ((trace_3x3 - 1.0) / 2.0).clamp(-1.0, 1.0);
-        let rotation_diff = cos_theta.acos().abs(); // 回転角 (rad)
-
-        last_delta_transform = new_delta;
+        // 8. Update State
+        let prev_pose = current_global_pose.clone();
         current_global_pose = total_transform.clone();
 
-        //「一定以上動いた場合」 または 「最初の数フレーム」 だけマップ更新
-        // これにより、停止時のノイズ蓄積を防ぎつつ、動いている時は滑らかに追従します
-        const MOVE_THRESHOLD_MIN: f32 = 0.02; // 2cm以上動いたら
-        const MOVE_THRESHOLD_MAX: f32 = 0.80; // 40cm以上動いたら
-        const ANGLE_THRESHOLD: f32 = 0.050; // 約0.5度以上回ったら
-        // const ANGLE_THRESHOLD: f32 = 0.015; // 約0.5度以上回ったら
+        let dt = current_frame_timestamp - last_frame_timestamp; 
+        // ★修正: 速度フィードバックを切る (安定化のため)
+        // GICPが少しでも飛ぶと、それが「猛加速」として次のフレームに悪影響を与えるため、
+        // 慣性航法(予測)は「回転のみ」とし、位置の予測速度は0とします。
+        current_velocity = Vector3::new(0.0, 0.0, 0.0);
+        // どうしても速度予測を使いたい場合は、以下のように上限(クランプ)を設けてください
+        if dt > 1e-6 {
+            let vel = (current_global_pose.slice(s![0..3, 3]).to_owned() - prev_pose.slice(s![0..3, 3])) / dt as f32;
+            // 最大 2.0 m/s に制限
+            current_velocity = Vector3::new(vel[0_usize] as f64, vel[1_usize] as f64, vel[2_usize] as f64).cap_magnitude(2.0);
+        }
 
-        if i < 10 || (translation_diff < MOVE_THRESHOLD_MAX && translation_diff > MOVE_THRESHOLD_MIN) {
-            println!("Rotation diff: {:.4} rad, Translation diff: {:.4} m -- updating map", rotation_diff, translation_diff);
+        last_frame_timestamp = current_frame_timestamp;
+
+        // 9. Map Update Logic (マップ更新判定)
+        // -----------------------------------------------------------
+        // ★修正: 正しい移動量(Delta)の計算
+        // Delta = T_current * T_prev^-1
+        let pose_delta = current_global_pose.dot(&prev_pose.inv().unwrap());
+        
+        let t_dist = pose_delta.slice(s![0..3, 3]).norm();
+        let tr = pose_delta[[0,0]] + pose_delta[[1,1]] + pose_delta[[2,2]];
+        let r_angle = ((tr - 1.0)/2.0).clamp(-1.0, 1.0).acos();
+
+        // 閾値: 10cm移動 OR 3度回転
+        const KEYFRAME_DIST: f32 = 0.1; 
+        const KEYFRAME_ANGLE: f32 = 0.05; 
+
+        // 初期の10フレームは無条件で更新してマップを育てる
+        if i < 10 || t_dist > KEYFRAME_DIST || r_angle > KEYFRAME_ANGLE {
+            println!("Update Map! (Frame {}, Dist: {:.3}m, Angle: {:.3}rad)", i, t_dist, r_angle);
+
+            // ローカルマップに追加するのは「現在の推定位置」によってGlobal座標系に変換された点群
+            // ダウンサンプル済みの点群を使うと軽量
+            let n_pts = downsampled_pts.nrows();
+            let mut pts_homo = Array2::<f32>::ones((n_pts, 4));
+            pts_homo.slice_mut(s![.., 0..3]).assign(&downsampled_pts);
             
-            if rotation_diff < ANGLE_THRESHOLD {
-                // 1. 点群の変換
-                let n_down = downsampled_pts.nrows();
-                let mut downsampled_homo = Array2::<f32>::ones((n_down, 4));
-                downsampled_homo.slice_mut(s![.., 0..3]).assign(&downsampled_pts);
-                
-                // 変換行列を適用
-                let final_transformed_homogeneous = downsampled_homo.dot(&total_transform.t());
-                let r_mat = total_transform.slice(s![0..3, 0..3]).to_owned();
-                let aligned_pts = final_transformed_homogeneous.slice(s![.., 0..3]).to_owned();
-                let aligned_covs: Vec<Matrix3<f64>> = downsampled_covs.iter()
-                    .map(|c| {
-                        // Convert ndarray to nalgebra Matrix3 for multiplication
-                        let r_nalgebra = Matrix3::new(
-                            r_mat[[0, 0]] as f64, r_mat[[0, 1]] as f64, r_mat[[0, 2]] as f64,
-                            r_mat[[1, 0]] as f64, r_mat[[1, 1]] as f64, r_mat[[1, 2]] as f64,
-                            r_mat[[2, 0]] as f64, r_mat[[2, 1]] as f64, r_mat[[2, 2]] as f64,
-                        );
-                        r_nalgebra * c * r_nalgebra.transpose()
-                    })
-                    .collect();
+            // 変換: P_global = T_current * P_local
+            let pts_global_homo = pts_homo.dot(&current_global_pose.t());
+            let pts_global = pts_global_homo.slice(s![.., 0..3]).to_owned();
 
-                // 2. ローカルマップに追加
-                if i % 2 == 0 {
-                    local_map_queue.push_back(FrameData {
-                        points: aligned_pts.clone(),
-                        covariances: aligned_covs.clone(),
-                    });
-                }
-                
-                if local_map_queue.len() > LOCAL_MAP_SIZE {
-                    local_map_queue.pop_front();
-                }
+            // 共分散の回転: C_global = R * C_local * R^T
+            let r_mat = current_global_pose.slice(s![0..3, 0..3]);
+            let r_nalgebra = Matrix3::new(
+                r_mat[[0,0]] as f64, r_mat[[0,1]] as f64, r_mat[[0,2]] as f64,
+                r_mat[[1,0]] as f64, r_mat[[1,1]] as f64, r_mat[[1,2]] as f64,
+                r_mat[[2,0]] as f64, r_mat[[2,1]] as f64, r_mat[[2,2]] as f64,
+            );
+            
+            let covs_global: Vec<Matrix3<f64>> = downsampled_covs.iter()
+                .map(|c| r_nalgebra * c * r_nalgebra.transpose())
+                .collect();
 
-                // 3. グローバルマップへの保存
-                if i % 3 == 0 {
-                    let n_raw = current_pts_arr.nrows();
-                    let mut raw_homo = Array2::<f32>::ones((n_raw, 4));
-                    raw_homo.slice_mut(s![.., 0..3]).assign(&current_pts_arr);
-                    
-                    // 変換を適用
-                    let transformed_raw = raw_homo.dot(&total_transform.t());
-                    let aligned_raw_pts = transformed_raw.slice(s![.., 0..3]).to_owned();
-                    
-                    global_map_accumulator.push(aligned_raw_pts);
-                }
+            // キューに追加
+            local_map_queue.push_back(FrameData {
+                points: pts_global.clone(),
+                covariances: covs_global
+            });
+            
+            if local_map_queue.len() > LOCAL_MAP_SIZE {
+                local_map_queue.pop_front();
+            }
+
+            // Global Map Accumulator (保存用) にも追加
+            // 毎回保存すると重すぎるので、キーフレーム更新時のタイミングで保存
+            // さらにデータ量を減らしたい場合は if i % 5 == 0 {} などで間引く
+            if i % 6 == 0 {
+                global_map_accumulator.push(pts_global);
             }
         }
+        // -----------------------------------------------------------
+
+        // Trajectory Log
+        icp_trajectory_log.push(extract_pose_from_matrix(current_frame_timestamp, &current_global_pose));
 
         // Debug
         if i % 50 == 0 {
@@ -512,6 +576,90 @@ fn main() -> Result<()> {
     println!("Saved final merged point cloud to {}", final_save_path);
     
     Ok(())
+}
+
+fn predict_pose_by_imu(
+    start_pose_mat: &Array2<f32>, // 前回のGICP収束後の姿勢 (4x4)
+    start_vel: &Vector3<f64>,     // 前回の速度
+    start_time: f64,              // 前回のタイムスタンプ
+    end_time: f64,                // 今回のタイムスタンプ
+    imu_samples: &[ImuSample],    // 全IMUデータ
+) -> (Array2<f32>, Vector3<f64>) { // (予測姿勢, 予測速度)
+    
+    // 1. Array2<f32> から nalgebra の型 (Isometry3/UnitQuaternion) に変換
+    let tx = start_pose_mat[[0, 3]] as f64;
+    let ty = start_pose_mat[[1, 3]] as f64;
+    let tz = start_pose_mat[[2, 3]] as f64;
+    let mut position = Vector3::new(tx, ty, tz);
+
+    let mat3 = Matrix3::new(
+        start_pose_mat[[0, 0]] as f64, start_pose_mat[[0, 1]] as f64, start_pose_mat[[0, 2]] as f64,
+        start_pose_mat[[1, 0]] as f64, start_pose_mat[[1, 1]] as f64, start_pose_mat[[1, 2]] as f64,
+        start_pose_mat[[2, 0]] as f64, start_pose_mat[[2, 1]] as f64, start_pose_mat[[2, 2]] as f64,
+    );
+    let mut rotation = UnitQuaternion::from_matrix(&mat3);
+    let mut velocity = *start_vel;
+
+    // 重力ベクトル (World frame, Z-upと仮定)
+    let gravity = Vector3::new(0.0, 0.0, 9.80665);
+
+    // 2. 指定範囲のIMUデータを抽出
+    // 前回の終わりから今回の終わりまでを含めるため少しバッファを持たせるか、厳密にフィルタリングする
+    let relevant_samples: Vec<&ImuSample> = imu_samples.iter()
+        .filter(|s| s.timestamp_sec > start_time && s.timestamp_sec <= end_time)
+        .collect();
+
+    let mut last_t = start_time;
+
+    // 3. 積分 (Dead Reckoning)
+    for sample in relevant_samples {
+        let dt = sample.timestamp_sec - last_t;
+        if dt <= 1e-9 { continue; }
+
+        // --- 回転の更新 (Gyro) ---
+        let wx = sample.gyro[0] as f64;
+        let wy = sample.gyro[1] as f64;
+        let wz = sample.gyro[2] as f64;
+        let omega = Vector3::new(wx, wy, wz);
+        
+        let angle = omega.norm() * dt;
+        let axis = if angle < 1e-9 { Vector3::x_axis() } else { Unit::new_normalize(omega) };
+        let delta_q = UnitQuaternion::from_axis_angle(&axis, angle);
+        
+        rotation = rotation * delta_q; // Global frame orientation update
+        rotation.renormalize();
+
+        // --- 速度・位置の更新 (Accel) ---
+        let ax = sample.linear_acceleration[0] as f64;
+        let ay = sample.linear_acceleration[1] as f64;
+        let az = sample.linear_acceleration[2] as f64;
+        let acc_local = Vector3::new(ax, ay, az);
+
+        // ローカル加速度をグローバルへ変換
+        let acc_global = rotation * acc_local;
+        
+        // 重力除去
+        let acc_net = acc_global - gravity;
+
+        // 等加速度運動として積分
+        position += velocity * dt + 0.5 * acc_net * dt * dt;
+        velocity += acc_net * dt;
+
+        last_t = sample.timestamp_sec;
+    }
+
+    // 4. nalgebra -> Array2<f32> (4x4 Matrix) に戻す
+    let r_mat = rotation.to_rotation_matrix();
+    let r = r_mat.matrix();
+    
+    let predicted_mat = ndarray::array![
+        [r[(0,0)] as f32, r[(0,1)] as f32, r[(0,2)] as f32, position.x as f32],
+        [r[(1,0)] as f32, r[(1,1)] as f32, r[(1,2)] as f32, position.y as f32],
+        [r[(2,0)] as f32, r[(2,1)] as f32, r[(2,2)] as f32, position.z as f32],
+        [0.0,             0.0,             0.0,             1.0]
+    ];
+
+    (predicted_mat, velocity)
 }
 
 fn flatten_local_map(
