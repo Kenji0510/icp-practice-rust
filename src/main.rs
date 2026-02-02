@@ -1,7 +1,10 @@
 use std::time::Instant;
 
-use anyhow::{Result, Context};
-use icp_practice::operate_pcd::{PointXYZ, PointXYZNormal, Points, load_pcd_xyz, load_pcd_xyzrgb, save_pcd, save_pcd_with_normals};
+use anyhow::{Context, Result};
+use icp_practice::operate_pcd::{
+    PointXYZ, PointXYZNormal, Points, load_pcd_xyz, load_pcd_xyzrgb, save_pcd,
+    save_pcd_with_normals,
+};
 use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
@@ -23,7 +26,8 @@ const K_NEIGHBORS: usize = 15;
 fn main() -> Result<()> {
     // let target_pcd_file_path = "data/input/H927/lab-room_voxel_025_xyz_only.pcd";
     let target_pcd_file_path = "data/input/aist/aist-voxelized-025.pcd";
-    let source_pcd_file_path = "data/input/aist/vggt-sansouken-room-scale-7_5_voxel_025_xyz_only.pcd";
+    let source_pcd_file_path =
+        "data/input/aist/vggt-sansouken-room-scale-7_5_voxel_025_xyz_only.pcd";
 
     // let target_d = load_pcd_xyz(target_pcd_file_path).context("Failed to load Target PCD")?;
     let target_d = load_pcd_xyz(target_pcd_file_path).context("Failed to load Target PCD")?;
@@ -31,18 +35,20 @@ fn main() -> Result<()> {
 
     let target_pts = Points::new(target_d);
     let source_pts = Points::new(source_d);
-    
+
     let target_pts_arr = points_to_array2(&target_pts);
     let source_pts_arr = points_to_array2(&source_pts);
 
-    println!("Loaded Target: {} pts, Source: {} pts", target_pts_arr.nrows(), source_pts_arr.nrows());
+    println!(
+        "Loaded Target: {} pts, Source: {} pts",
+        target_pts_arr.nrows(),
+        source_pts_arr.nrows()
+    );
 
     // --- 2. 前処理: 重心合わせ (Centroid Alignment) ---
     // ここで大まかな位置を合わせる（必須）
-    let (initial_translation, transformed_source_pts_arr) = registration_pcd_center(
-        &source_pts_arr,
-        &target_pts_arr
-    );
+    let (initial_translation, transformed_source_pts_arr) =
+        registration_pcd_center(&source_pts_arr, &target_pts_arr);
     println!("Source point cloud centered to target centroid.");
 
     // --- 3. 準備: Target側のKDTreeと法線計算 (1回だけ計算して使い回す) ---
@@ -50,7 +56,9 @@ fn main() -> Result<()> {
     let n_dims_target = target_pts_arr.ncols();
     let mut kdtree: KdTree<f64, usize, Vec<f64>> = KdTree::new(n_dims_target);
     for (i, point_row) in target_pts_arr.rows().into_iter().enumerate() {
-        kdtree.add(point_row.to_slice().unwrap().to_vec(), i).unwrap();
+        kdtree
+            .add(point_row.to_slice().unwrap().to_vec(), i)
+            .unwrap();
     }
 
     let viewpoint = arr1(&[0.0, 0.0, 0.0]);
@@ -67,11 +75,11 @@ fn main() -> Result<()> {
         &target_pts_arr,
         &target_normals,
         &kdtree,
-        initial_transform,           // 初期姿勢
-        20,                          // max_iterations
-        0.015,                       // tolerance
+        initial_transform, // 初期姿勢
+        20,                // max_iterations
+        0.015,             // tolerance
         DEFAULT_SAMPLE_SIZE,
-        DEFAULT_TRIM_PERCENTAGE
+        DEFAULT_TRIM_PERCENTAGE,
     )?;
 
     println!("ICP Result: RMSE = {:.6}", final_rmse);
@@ -80,31 +88,36 @@ fn main() -> Result<()> {
     // --- 2h. 最終結果の計算 ---
     let n_points_source = transformed_source_pts_arr.nrows();
     let mut source_homogeneous = Array2::<f64>::ones((n_points_source, 4));
-    source_homogeneous.slice_mut(s![.., 0..3]).assign(&transformed_source_pts_arr);
-    
+    source_homogeneous
+        .slice_mut(s![.., 0..3])
+        .assign(&transformed_source_pts_arr);
+
     let final_transformed_homogeneous = source_homogeneous.dot(&final_transform.t());
     let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
 
     let n_points_source = transformed_source_pts_arr.nrows();
     let mut source_homogeneous = Array2::<f64>::ones((n_points_source, 4));
-    source_homogeneous.slice_mut(s![.., 0..3]).assign(&transformed_source_pts_arr);
-    
+    source_homogeneous
+        .slice_mut(s![.., 0..3])
+        .assign(&transformed_source_pts_arr);
+
     let base_aligned_homo = source_homogeneous.dot(&final_transform.t());
     let base_aligned_pts = base_aligned_homo.slice(s![.., 0..3]).to_owned();
 
     // 2. 反転・回転の候補を作成
     // candidate_original は「そのまま」のデータ
-    let (candidate_lr, candidate_ud, candidate_rot_z, candidate_rot_y, candidate_rot_x) = reverse_pcd(&base_aligned_pts);
+    let (candidate_lr, candidate_ud, candidate_rot_z, candidate_rot_y, candidate_rot_x) =
+        reverse_pcd(&base_aligned_pts);
 
     // 比較ループ用のベクターを作成
     // (ラベル, 点群データ, 元のRMSE)
     let candidates = vec![
-        ("Original",    base_aligned_pts,  final_rmse), 
-        ("LR Flip",     candidate_lr,      f64::MAX),
-        ("UD Flip",     candidate_ud,      f64::MAX),
-        ("Rot 180 Z",   candidate_rot_z,   f64::MAX),
-        ("Rot 180 Y",   candidate_rot_y,   f64::MAX),
-        ("Rot 180 X",   candidate_rot_x,   f64::MAX),
+        ("Original", base_aligned_pts, final_rmse),
+        ("LR Flip", candidate_lr, f64::MAX),
+        ("UD Flip", candidate_ud, f64::MAX),
+        ("Rot 180 Z", candidate_rot_z, f64::MAX),
+        ("Rot 180 Y", candidate_rot_y, f64::MAX),
+        ("Rot 180 X", candidate_rot_x, f64::MAX),
     ];
 
     let mut best_rmse = f64::MAX;
@@ -122,15 +135,15 @@ fn main() -> Result<()> {
             // 反転・回転させた候補に対して、仕上げのICPを実行
             // 初期姿勢は Identity (既に反転などで移動済みのため)
             let (refine_tf, refine_rmse) = perform_icp_point_to_plane(
-                &pts,                // 反転済みの点群を入力
+                &pts, // 反転済みの点群を入力
                 &target_pts_arr,
                 &target_normals,
                 &kdtree,
-                Array2::eye(4),      // initial_transform
-                40,                  // max_iterations (仕上げなので多めでもOK)
-                0.015,               // tolerance
+                Array2::eye(4), // initial_transform
+                40,             // max_iterations (仕上げなので多めでもOK)
+                0.015,          // tolerance
                 DEFAULT_SAMPLE_SIZE,
-                DEFAULT_TRIM_PERCENTAGE
+                DEFAULT_TRIM_PERCENTAGE,
             )?;
 
             // 仕上げICPの結果を点群に適用
@@ -192,8 +205,14 @@ fn main() -> Result<()> {
 }
 
 fn reverse_pcd(
-    points: &Array2<f64>
-) -> (Array2<f64>, Array2<f64>, Array2<f64>, Array2<f64>, Array2<f64>) {
+    points: &Array2<f64>,
+) -> (
+    Array2<f64>,
+    Array2<f64>,
+    Array2<f64>,
+    Array2<f64>,
+    Array2<f64>,
+) {
     // 1. 左右反転 (Y軸反転 - YZ平面に対する鏡像)
     let mut mirror_lr = points.clone();
     mirror_lr.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
@@ -217,30 +236,37 @@ fn reverse_pcd(
     rotate_180_x.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
     rotate_180_x.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
 
-    (mirror_lr, mirror_ud, rotate_180_z, rotate_180_y, rotate_180_x)
+    (
+        mirror_lr,
+        mirror_ud,
+        rotate_180_z,
+        rotate_180_y,
+        rotate_180_x,
+    )
 }
 
 fn perform_icp_point_to_plane(
-    source_pts: &Array2<f64>,         // ソース点群 (Nx3)
-    target_pts: &Array2<f64>,         // ターゲット点群 (Mx3)
-    target_normals: &Array2<f64>,     // ターゲット法線 (Mx3)
+    source_pts: &Array2<f64>,              // ソース点群 (Nx3)
+    target_pts: &Array2<f64>,              // ターゲット点群 (Mx3)
+    target_normals: &Array2<f64>,          // ターゲット法線 (Mx3)
     kdtree: &KdTree<f64, usize, Vec<f64>>, // ターゲットのKDTree
-    initial_transform: Array2<f64>,   // 初期変換行列 (4x4)
+    initial_transform: Array2<f64>,        // 初期変換行列 (4x4)
     max_iterations: usize,
     tolerance: f64,
     sample_size: usize,
     trim_percentage: f64,
 ) -> Result<(Array2<f64>, f64)> {
-    
     let start_time = Instant::now();
     let n_points_source = source_pts.nrows();
-    
+
     // 現在の累積変換行列 (初期値でセット)
     let mut total_transform = initial_transform;
 
     // ソース点群を同次座標系 (N, 4) に変換して保持 (これはループ内で不変)
     let mut source_homogeneous = Array2::<f64>::ones((n_points_source, 4));
-    source_homogeneous.slice_mut(s![.., 0..3]).assign(source_pts);
+    source_homogeneous
+        .slice_mut(s![.., 0..3])
+        .assign(source_pts);
 
     let mut rng = thread_rng();
     let source_indices: Vec<usize> = (0..n_points_source).collect();
@@ -256,7 +282,8 @@ fn perform_icp_point_to_plane(
         let (sampled_source_pts, _) = if n_points_source <= sample_size {
             (current_pts_arr.clone(), source_indices.clone())
         } else {
-            let indices = source_indices.as_slice()
+            let indices = source_indices
+                .as_slice()
                 .choose_multiple(&mut rng, sample_size)
                 .cloned()
                 .collect::<Vec<usize>>();
@@ -264,20 +291,23 @@ fn perform_icp_point_to_plane(
         };
 
         // 3. 対応点探索 (Nearest Neighbor)
-        let (matched_target_pts, matched_target_indices, distance_sq) = 
+        let (matched_target_pts, matched_target_indices, distance_sq) =
             find_closest_pairs_kdtree(&sampled_source_pts, target_pts, kdtree);
 
         // 4. トリミング (Outlier Rejection)
-        let mut dist_with_indices: Vec<(f64, usize)> = distance_sq.iter()
+        let mut dist_with_indices: Vec<(f64, usize)> = distance_sq
+            .iter()
             .cloned()
             .enumerate()
             .map(|(idx, dist)| (dist, idx))
             .collect();
         // 距離順にソート
-        dist_with_indices.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        
+        dist_with_indices
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
         let n_to_keep = (dist_with_indices.len() as f64 * trim_percentage) as usize;
-        let inlier_indices: Vec<usize> = dist_with_indices.iter()
+        let inlier_indices: Vec<usize> = dist_with_indices
+            .iter()
             .take(n_to_keep)
             .map(|&(_dist, idx)| idx)
             .collect();
@@ -287,7 +317,8 @@ fn perform_icp_point_to_plane(
         let inlier_target_pts = matched_target_pts.select(Axis(0), &inlier_indices);
 
         // 対応する法線の抽出
-        let inlier_target_global_indices: Vec<usize> = inlier_indices.iter()
+        let inlier_target_global_indices: Vec<usize> = inlier_indices
+            .iter()
             .map(|&idx_n| matched_target_indices[idx_n])
             .collect();
         let inlier_target_normals = target_normals.select(Axis(0), &inlier_target_global_indices);
@@ -297,7 +328,7 @@ fn perform_icp_point_to_plane(
         let delta_transform = match calculate_transformation_pt_to_plane(
             &inlier_source_pts,
             &inlier_target_pts,
-            &inlier_target_normals
+            &inlier_target_normals,
         ) {
             Ok(tf) => tf,
             Err(e) => {
@@ -314,11 +345,16 @@ fn perform_icp_point_to_plane(
             &inlier_source_pts,
             &inlier_target_pts,
             &inlier_target_normals,
-            &delta_transform
+            &delta_transform,
         );
 
         if (i + 1) % 5 == 0 || i == 0 {
-             println!("Iter {}: RMSE = {:.6} (Inliers: {})", i + 1, current_error, n_to_keep);
+            println!(
+                "Iter {}: RMSE = {:.6} (Inliers: {})",
+                i + 1,
+                current_error,
+                n_to_keep
+            );
         }
 
         // 8. 収束判定
@@ -327,11 +363,11 @@ fn perform_icp_point_to_plane(
             last_error = current_error;
             break;
         }
-        
+
         // エラーの変化が極小なら止める判定を入れても良い
         if (last_error - current_error).abs() < 1e-6 {
-             // println!("Error stabilized.");
-             // break; 
+            // println!("Error stabilized.");
+            // break;
         }
         last_error = current_error;
     }
@@ -347,14 +383,15 @@ fn calculate_mean_pt_to_plane_error(
     source_pts: &Array2<f64>, // 適用 "前" のソース点
     target_pts: &Array2<f64>,
     target_normals: &Array2<f64>,
-    delta_transform: &Array2<f64> // "今から" 適用する微小変換
+    delta_transform: &Array2<f64>, // "今から" 適用する微小変換
 ) -> f64 {
-    
     let n = source_pts.nrows();
-    
+
     // ソース点を同次座標系 (N, 4) に
     let mut source_homogeneous = Array2::<f64>::ones((n, 4));
-    source_homogeneous.slice_mut(s![.., 0..3]).assign(source_pts);
+    source_homogeneous
+        .slice_mut(s![.., 0..3])
+        .assign(source_pts);
 
     // 微小変換を適用
     let transformed_homogeneous = source_homogeneous.dot(&delta_transform.t());
@@ -362,11 +399,11 @@ fn calculate_mean_pt_to_plane_error(
 
     // (target - transformed_source) . normal
     let diff = target_pts - &transformed_pts;
-    
+
     // `diff` (N, 3) と `target_normals` (N, 3) の
     // 各行どうしの内積 (ドット積) を計算
     let errors = (&diff * target_normals) // 要素ごとの積
-        .sum_axis(Axis(1))     // 行ごとに合計 (＝内積)
+        .sum_axis(Axis(1)) // 行ごとに合計 (＝内積)
         .mapv(|val| val * val); // 2乗する
 
     (errors.sum() / n as f64).sqrt() // 二乗平均平方根 (RMSE)
@@ -377,11 +414,12 @@ fn calculate_mean_pt_to_plane_error(
 fn calculate_transformation_pt_to_plane(
     inlier_source_pts: &Array2<f64>, // 現在のイテレーションのソース点 (N x 3)
     inlier_target_pts: &Array2<f64>, // 対応するターゲット点 (N x 3)
-    inlier_target_normals: &Array2<f64> // 対応するターゲット法線 (N x 3)
-) -> Result<Array2<f64>> { // 4x4 の "微小" 変換行列 (Delta T) を返す
+    inlier_target_normals: &Array2<f64>, // 対応するターゲット法線 (N x 3)
+) -> Result<Array2<f64>> {
+    // 4x4 の "微小" 変換行列 (Delta T) を返す
 
     let n_inliers = inlier_source_pts.nrows();
-    
+
     // A (ヤコビアン) は N x 6 の行列
     let mut a = Array2::<f64>::zeros((n_inliers, 6));
     // b (誤差) は N x 1 のベクトル
@@ -396,7 +434,7 @@ fn calculate_transformation_pt_to_plane(
         n_t in inlier_target_normals.axis_iter(Axis(0)) // n_i (target normal)
     ) {
         // --- ここがPoint-to-Planeの核心 ---
-        
+
         // p'_i x n_i (クロス積)
         // Manual cross product: p'_i x n_i
         let cross_x = p_s[1] * n_t[2] - p_s[2] * n_t[1];
@@ -410,13 +448,13 @@ fn calculate_transformation_pt_to_plane(
         a_row[3] = n_t[0];        // (n_i)_x
         a_row[4] = n_t[1];        // (n_i)_y
         a_row[5] = n_t[2];        // (n_i)_z
-        
+
         // b の値 (スカラー)
         // b_i = (x_i - p'_i) . n_i
         let diff = &p_t - &p_s;
         *b_val = diff.dot(&n_t);
     });
-    
+
     // (A^T A) x = (A^T b) の形で解く
     // at_a は (6xN) * (Nx6) = (6x6)
     let at_a = a.t().dot(&a);
@@ -425,22 +463,24 @@ fn calculate_transformation_pt_to_plane(
 
     // 6x6 の小さな連立方程式を解く
     // x = (A^T A)^-1 * (A^T b)
-    let x = at_a.solve(&at_b)
-    .map_err(|e| anyhow::anyhow!("Linear solve failed: {:?}", e))
-    .or_else(|_|  -> Result<Array1<f64>> {
-        // もし A^T A が特異行列 (解けない) なら、SVDで擬似逆行列を使って解く
-        // (これはロバスト性のためのフォールバック)
-        println!("Warning: Falling back to SVD solver for linear system.");
-        let (u, s, vt) = at_a.svd(true, true)
-            .map_err(|e| anyhow::anyhow!("SVD failed: {:?}", e))?;
-        
-        let u = u.context("SVD failed: U matrix is None")?;
-        let vt = vt.context("SVD failed: Vt matrix is None")?;
-        
-        let s_inv = s.mapv(|v| if v.abs() > 1e-6 { 1.0 / v } else { 0.0 });
-        let pinv = vt.t().dot(&Array2::from_diag(&s_inv)).dot(&u.t());
-        Ok(pinv.dot(&at_b))
-    })?;
+    let x = at_a
+        .solve(&at_b)
+        .map_err(|e| anyhow::anyhow!("Linear solve failed: {:?}", e))
+        .or_else(|_| -> Result<Array1<f64>> {
+            // もし A^T A が特異行列 (解けない) なら、SVDで擬似逆行列を使って解く
+            // (これはロバスト性のためのフォールバック)
+            println!("Warning: Falling back to SVD solver for linear system.");
+            let (u, s, vt) = at_a
+                .svd(true, true)
+                .map_err(|e| anyhow::anyhow!("SVD failed: {:?}", e))?;
+
+            let u = u.context("SVD failed: U matrix is None")?;
+            let vt = vt.context("SVD failed: Vt matrix is None")?;
+
+            let s_inv = s.mapv(|v| if v.abs() > 1e-6 { 1.0 / v } else { 0.0 });
+            let pinv = vt.t().dot(&Array2::from_diag(&s_inv)).dot(&u.t());
+            Ok(pinv.dot(&at_b))
+        })?;
 
     // x (6x1 ベクトル) を 4x4 の微小変換行列 Delta T に変換
     let alpha = x[0];
@@ -451,7 +491,7 @@ fn calculate_transformation_pt_to_plane(
     let tz = x[5];
 
     // 1. 回転ベクトル [α, β, γ] から「厳密な」3x3回転行列 R を計算
-    let theta = (alpha*alpha + beta*beta + gamma*gamma).sqrt();
+    let theta = (alpha * alpha + beta * beta + gamma * gamma).sqrt();
     let r: Array2<f64>; // 3x3 回転行列 R
 
     if theta < 1e-9 {
@@ -466,7 +506,7 @@ fn calculate_transformation_pt_to_plane(
         let k_x = alpha / theta;
         let k_y = beta / theta;
         let k_z = gamma / theta;
-        
+
         let c_th = theta.cos();
         let s_th = theta.sin();
         let v_th = 1.0 - c_th;
@@ -478,38 +518,51 @@ fn calculate_transformation_pt_to_plane(
 
         // R = I + sin(θ)K + (1-cos(θ))K^2
         r = array![
-            [k_x*k_x*v_th + c_th,       k_x*k_y*v_th - k_z*s_th, k_x*k_z*v_th + k_y*s_th],
-            [k_x*k_y*v_th + k_z*s_th, k_y*k_y*v_th + c_th,       k_y*k_z*v_th - k_x*s_th],
-            [k_x*k_z*v_th - k_y*s_th, k_y*k_z*v_th + k_x*s_th, k_z*k_z*v_th + c_th]
+            [
+                k_x * k_x * v_th + c_th,
+                k_x * k_y * v_th - k_z * s_th,
+                k_x * k_z * v_th + k_y * s_th
+            ],
+            [
+                k_x * k_y * v_th + k_z * s_th,
+                k_y * k_y * v_th + c_th,
+                k_y * k_z * v_th - k_x * s_th
+            ],
+            [
+                k_x * k_z * v_th - k_y * s_th,
+                k_y * k_z * v_th + k_x * s_th,
+                k_z * k_z * v_th + c_th
+            ]
         ];
     }
 
     // 2. 並進ベクトル t (3x1) を計算 (これは回転の影響も受ける)
     // (ここでは簡略化のため、並進はそのまま t = [tx, ty, tz] とします。
     //  厳密な指数写像では V * t も計算しますが、ICPではこの形でも十分に収束します)
-    
+
     // 3. 厳密な 4x4 剛体変換行列を構築
     let delta_t = array![
         [r[[0, 0]], r[[0, 1]], r[[0, 2]], tx],
         [r[[1, 0]], r[[1, 1]], r[[1, 2]], ty],
         [r[[2, 0]], r[[2, 1]], r[[2, 2]], tz],
-        [0.0,       0.0,       0.0,       1.0]
+        [0.0, 0.0, 0.0, 1.0]
     ];
-    
+
     Ok(delta_t)
 }
 
-fn create_points_with_normals(
-    points: &Array2<f64>,
-    normals: &Array2<f64>,
-) -> Vec<PointXYZNormal> {
-    assert_eq!(points.nrows(), normals.nrows(), "Points and normals must have same number of rows");
+fn create_points_with_normals(points: &Array2<f64>, normals: &Array2<f64>) -> Vec<PointXYZNormal> {
+    assert_eq!(
+        points.nrows(),
+        normals.nrows(),
+        "Points and normals must have same number of rows"
+    );
     assert_eq!(points.ncols(), 3, "Points must be 3D");
     assert_eq!(normals.ncols(), 3, "Normals must be 3D");
-    
+
     let n = points.nrows();
     let mut result = Vec::with_capacity(n);
-    
+
     for i in 0..n {
         result.push(PointXYZNormal {
             x: points[[i, 0]] as f32,
@@ -520,7 +573,7 @@ fn create_points_with_normals(
             normal_z: normals[[i, 2]] as f32,
         });
     }
-    
+
     result
 }
 
@@ -575,7 +628,7 @@ fn calculate_normals(
 
 fn registration_pcd_center(
     source_points: &Array2<f64>,
-    target_points: &Array2<f64>
+    target_points: &Array2<f64>,
 ) -> (Array2<f64>, Array2<f64>) {
     // Calculate centroids
     let source_centroid = source_points.mean_axis(Axis(0)).unwrap();
@@ -589,7 +642,7 @@ fn registration_pcd_center(
     transform[[0, 3]] = translation[0];
     transform[[1, 3]] = translation[1];
     transform[[2, 3]] = translation[2];
-    
+
     let n_points = source_points.nrows();
     let mut source_copy = Array2::<f64>::ones((n_points, 4));
     source_copy.slice_mut(s![.., 0..3]).assign(source_points);
@@ -599,9 +652,7 @@ fn registration_pcd_center(
     (transform, transformed_source)
 }
 
-fn array2_to_points(
-    arr: &Array2<f64>
-) -> Points {
+fn array2_to_points(arr: &Array2<f64>) -> Points {
     let mut pts = Vec::with_capacity(arr.len());
     for i in 0..arr.nrows() {
         pts.push(PointXYZ {
@@ -614,9 +665,7 @@ fn array2_to_points(
     Points::new(pts)
 }
 
-fn points_to_array2(
-    points: &Points
-) -> Array2<f64> {
+fn points_to_array2(points: &Points) -> Array2<f64> {
     let n = points.points.len();
     let mut arr = Array2::<f64>::zeros((n, 3));
 
@@ -630,23 +679,19 @@ fn points_to_array2(
 }
 
 fn find_closest_pairs_kdtree(
-    source_pts: &Array2<f64>,      // サンプリングされた source 点群
-    target_pts: &Array2<f64>,      // target 全体 (インデックスから点を引くため)
-    kdtree: &KdTree<f64, usize, Vec<f64>> // 事前に構築した tree
+    source_pts: &Array2<f64>,              // サンプリングされた source 点群
+    target_pts: &Array2<f64>,              // target 全体 (インデックスから点を引くため)
+    kdtree: &KdTree<f64, usize, Vec<f64>>, // 事前に構築した tree
 ) -> (Array2<f64>, Vec<usize>, Vec<f64>) {
-    
     let n = source_pts.nrows();
 
-    let results: Vec<(usize, f64)> = (0..n).into_par_iter()
+    let results: Vec<(usize, f64)> = (0..n)
+        .into_par_iter()
         .map(|i| {
             let source_row = source_pts.row(i);
             let query_point = source_row.as_slice().unwrap();
 
-            let neighbors = kdtree.nearest(
-                query_point, 
-                1, 
-                &squared_euclidean
-            ).unwrap();
+            let neighbors = kdtree.nearest(query_point, 1, &squared_euclidean).unwrap();
 
             let (dist_sq, &target_index) = neighbors[0];
             (target_index, dist_sq)
@@ -654,7 +699,7 @@ fn find_closest_pairs_kdtree(
         .collect();
 
     let (closest_indices, distance_sq): (Vec<usize>, Vec<f64>) = results.into_iter().unzip();
-    
+
     // 見つかったインデックスのリストを使って、
     // target_pts から対応する点を一括で抽出する
     let matched_target_pts = target_pts.select(Axis(0), &closest_indices);
@@ -663,7 +708,7 @@ fn find_closest_pairs_kdtree(
 
 fn find_closest_pairs(
     source_pts: &Array2<f64>,
-    target_pts: &Array2<f64>
+    target_pts: &Array2<f64>,
 ) -> (Array2<f64>, Vec<usize>) {
     let n = source_pts.nrows();
     let m = target_pts.nrows();
@@ -675,21 +720,20 @@ fn find_closest_pairs(
             dist_matrix[[i, j]] = diff.mapv(|x| x * x).sum().sqrt();
         }
     }
-    
+
     let closest_indices = find_closest_indices(&dist_matrix);
     let matched_target_pts = target_pts.select(Axis(0), &closest_indices);
     (matched_target_pts, closest_indices)
 }
 
-fn find_closest_indices(
-    dist_matrix: &Array2<f64>
-) -> Vec<usize> {
+fn find_closest_indices(dist_matrix: &Array2<f64>) -> Vec<usize> {
     let n = dist_matrix.nrows();
     let mut closest_indices = Vec::with_capacity(n);
 
     for i in 0..n {
         let row = dist_matrix.row(i);
-        let min_idx = row.iter()
+        let min_idx = row
+            .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(idx, _)| idx)

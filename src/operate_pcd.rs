@@ -1,7 +1,6 @@
+use anyhow::Result;
 use ndarray::prelude::*;
-use anyhow::{Result};
 use pcd_rs::{PcdDeserialize, PcdSerialize, Reader, WriterInit};
-
 
 #[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
 pub struct PointXYZ {
@@ -38,10 +37,7 @@ pub fn rgb_to_float(r: u8, g: u8, b: u8) -> f32 {
     f32::from_bits(rgb_int)
 }
 
-pub fn save_pcd_with_normals(
-    points: &[PointXYZNormal],
-    file_path: &str,
-) -> Result<()> {
+pub fn save_pcd_with_normals(points: &[PointXYZNormal], file_path: &str) -> Result<()> {
     let mut writer = pcd_rs::WriterInit {
         width: 1,
         height: points.len() as u64,
@@ -50,19 +46,16 @@ pub fn save_pcd_with_normals(
         schema: None,
     }
     .create(file_path)?;
-    
+
     for point in points {
         writer.push(point)?;
     }
-    
+
     writer.finish()?;
     Ok(())
 }
 
-pub fn save_pcd(
-    points: &[PointXYZRGB],
-    file_path: &str,
-) -> Result<()> {
+pub fn save_pcd(points: &[PointXYZRGB], file_path: &str) -> Result<()> {
     let mut writer = pcd_rs::WriterInit {
         width: 1,
         height: points.len() as u64,
@@ -71,7 +64,7 @@ pub fn save_pcd(
         schema: None,
     }
     .create(file_path)?;
-    
+
     for point in points {
         writer.push(point)?;
     }
@@ -79,26 +72,25 @@ pub fn save_pcd(
 
     Ok(())
 }
-
 
 impl Points {
     pub fn new(p: Vec<PointXYZ>) -> Self {
-        Points {
-            points: p,
-        }
+        Points { points: p }
     }
 
     pub fn apply_transform(&mut self, transform: &Array2<f64>) {
         assert_eq!(transform.shape(), &[4, 4], "Transform must be 4x4 matrix");
 
-        let transformed_points: Vec<PointXYZ> = self.points.iter()
+        let transformed_points: Vec<PointXYZ> = self
+            .points
+            .iter()
             .map(|p| {
                 // 同次座標に変換 [x, y, z, 1]
                 let point_homogeneous = array![p.x as f64, p.y as f64, p.z as f64, 1.0];
-                
+
                 // 変換適用: T * p
                 let transformed = transform.dot(&point_homogeneous);
-                
+
                 // 同次座標から3D座標に戻す
                 PointXYZ {
                     x: transformed[0] as f32,
@@ -111,33 +103,30 @@ impl Points {
         self.points = transformed_points;
     }
 
-    pub fn transform_colored_points(
-        &self,
-        color: (u8, u8, u8),
-    ) -> Vec<PointXYZRGB> {
-        let pts = self.points.iter()
+    pub fn transform_colored_points(&self, color: (u8, u8, u8)) -> Vec<PointXYZRGB> {
+        let pts = self
+            .points
+            .iter()
             .map(|p| PointXYZRGB {
                 x: p.x,
                 y: p.y,
                 z: p.z,
-                rgb: rgb_to_float(color.0, color.1, color.2)
+                rgb: rgb_to_float(color.0, color.1, color.2),
             })
             .collect();
 
         pts
     }
 
-    pub fn save_pcd(
-        &self,
-        file_path: &str,
-        color: (u8, u8, u8),
-    ) -> Result<()> {
-        let colored_points: Vec<PointXYZRGB> = self.points.iter()
+    pub fn save_pcd(&self, file_path: &str, color: (u8, u8, u8)) -> Result<()> {
+        let colored_points: Vec<PointXYZRGB> = self
+            .points
+            .iter()
             .map(|p| PointXYZRGB {
                 x: p.x,
                 y: p.y,
                 z: p.z,
-                rgb: rgb_to_float(color.0, color.1, color.2)
+                rgb: rgb_to_float(color.0, color.1, color.2),
             })
             .collect();
 
@@ -149,7 +138,7 @@ impl Points {
             schema: None,
         }
         .create(file_path)?;
-        
+
         for point in &colored_points {
             writer.push(point)?;
         }
@@ -159,10 +148,7 @@ impl Points {
     }
 }
 
-
-pub fn load_pcd_xyz(
-    file_path: &str,
-) -> Result<Vec<PointXYZ>> {
+pub fn load_pcd_xyz(file_path: &str) -> Result<Vec<PointXYZ>> {
     let reader = match Reader::open(file_path) {
         Ok(r) => r,
         Err(e) => {
@@ -182,9 +168,7 @@ pub fn load_pcd_xyz(
     Ok(points)
 }
 
-pub fn load_pcd_xyzrgb(
-    file_path: &str,
-) -> Result<Vec<PointXYZ>> {
+pub fn load_pcd_xyzrgb(file_path: &str) -> Result<Vec<PointXYZ>> {
     let reader = match Reader::open(file_path) {
         Ok(r) => r,
         Err(e) => {
@@ -201,12 +185,14 @@ pub fn load_pcd_xyzrgb(
         }
     };
 
-    let points = points_rgb.into_iter().map(|p| PointXYZ {
-        x: p.x,
-        y: p.y,
-        z: p.z,
-    })
-    .collect();
+    let points = points_rgb
+        .into_iter()
+        .map(|p| PointXYZ {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        })
+        .collect();
 
     Ok(points)
 }
