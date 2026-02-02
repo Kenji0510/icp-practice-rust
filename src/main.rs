@@ -22,11 +22,11 @@ const K_NEIGHBORS: usize = 15;
 
 fn main() -> Result<()> {
     // let target_pcd_file_path = "data/input/H927/lab-room_voxel_025_xyz_only.pcd";
-    let target_pcd_file_path = "data/input/H927/h927-ok-20251212_v-025.pcd";
-    let source_pcd_file_path = "data/input/H927/vggt-data_output_voxel_025_xyz_only.pcd";
+    let target_pcd_file_path = "data/input/aist/aist-voxelized-025.pcd";
+    let source_pcd_file_path = "data/input/aist/vggt-sansouken-room-scale-7_5_voxel_025_xyz_only.pcd";
 
     // let target_d = load_pcd_xyz(target_pcd_file_path).context("Failed to load Target PCD")?;
-    let target_d = load_pcd_xyzrgb(target_pcd_file_path).context("Failed to load Target PCD")?;
+    let target_d = load_pcd_xyz(target_pcd_file_path).context("Failed to load Target PCD")?;
     let source_d = load_pcd_xyz(source_pcd_file_path).context("Failed to load Source PCD")?;
 
     let target_pts = Points::new(target_d);
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         &target_normals,
         &kdtree,
         initial_transform,           // 初期姿勢
-        40,                          // max_iterations
+        20,                          // max_iterations
         0.015,                       // tolerance
         DEFAULT_SAMPLE_SIZE,
         DEFAULT_TRIM_PERCENTAGE
@@ -176,13 +176,13 @@ fn main() -> Result<()> {
     all_points.extend(colored_transformed_source_pts.clone());
 
     // Save each point clouds
-    let save_path = "data/output/Rentallab-matching/icp_aligned_all_result_v-025.pcd";
+    let save_path = "data/output/aist/icp_aligned_all_result_v-025.pcd";
     match save_pcd(&all_points, save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
     }
 
-    let save_path = "data/output/Rentallab-matching/icp_aligned_result_v-025.pcd";
+    let save_path = "data/output/aist/icp_aligned_result_v-025.pcd";
     match save_pcd(&all_points_without_centering, save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
