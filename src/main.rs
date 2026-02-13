@@ -104,65 +104,83 @@ fn main() -> Result<()> {
     let base_aligned_homo = source_homogeneous.dot(&final_transform.t());
     let base_aligned_pts = base_aligned_homo.slice(s![.., 0..3]).to_owned();
 
-    // 2. 反転・回転の候補を作成
-    // candidate_original は「そのまま」のデータ
-    let (candidate_lr, candidate_ud, candidate_rot_z, candidate_rot_y, candidate_rot_x) =
-        reverse_pcd(&base_aligned_pts);
-
-    // 比較ループ用のベクターを作成
-    // (ラベル, 点群データ, 元のRMSE)
-    let candidates = vec![
-        ("Original", base_aligned_pts, final_rmse),
-        ("LR Flip", candidate_lr, f64::MAX),
-        ("UD Flip", candidate_ud, f64::MAX),
-        ("Rot 180 Z", candidate_rot_z, f64::MAX),
-        ("Rot 180 Y", candidate_rot_y, f64::MAX),
-        ("Rot 180 X", candidate_rot_x, f64::MAX),
+    // --- 5. 反転・回転候補の作成と評価 ---
+    // 元のsource点群に対して反転・回転を適用してから、重心合わせ→ICPを実行
+    println!("\n--- Starting Hypothesis Verification (from original source) ---");
+    
+    // 反転・回転の変換行列を4x4行列として定義
+    let flip_rot_transforms = vec![
+        ("LR Flip (Y反転)", create_lr_flip_matrix()),
+        ("UD Flip (Z反転)", create_ud_flip_matrix()),
+        ("Front-Back Flip (X反転)", create_fb_flip_matrix()),
+        ("Rot 180 Z", create_rot_180_z_matrix()),
+        ("Rot 180 Y", create_rot_180_y_matrix()),
+        ("Rot 180 X", create_rot_180_x_matrix()),
+        ("LR+UD Flip", create_lr_flip_matrix().dot(&create_ud_flip_matrix())),
+        ("LR+FB Flip", create_lr_flip_matrix().dot(&create_fb_flip_matrix())),
+        ("UD+FB Flip", create_ud_flip_matrix().dot(&create_fb_flip_matrix())),
+        ("Rot90 X", create_rot_90_x_matrix()),
+        ("Rot-90 X", create_rot_minus_90_x_matrix()),
+        ("Rot90 Y", create_rot_90_y_matrix()),
+        ("Rot-90 Y", create_rot_minus_90_y_matrix()),
+        ("Rot90 Z", create_rot_90_z_matrix()),
+        ("Rot-90 Z", create_rot_minus_90_z_matrix()),
     ];
 
+    // 候補点群を生成（元のsourceに対して反転・回転を適用）
+    let mut candidates = vec![
+        ("Original", base_aligned_pts.clone(), final_rmse, final_transform.clone()),
+    ];
+
+    for (label, flip_rot_matrix) in flip_rot_transforms {
+        // 1. 元のsource点群に反転・回転変換を適用
+        let mut source_homo = Array2::<f64>::ones((source_pts_arr.nrows(), 4));
+        source_homo.slice_mut(s![.., 0..3]).assign(&source_pts_arr);
+        let flipped_homo = source_homo.dot(&flip_rot_matrix.t());
+        let flipped_pts = flipped_homo.slice(s![.., 0..3]).to_owned();
+
+        // 2. 重心合わせ
+        let (_, transformed_flipped_pts) = registration_pcd_center(&flipped_pts, &target_pts_arr);
+
+        // 3. ICPを実行
+        let (icp_tf, icp_rmse) = perform_icp_point_to_plane(
+            &transformed_flipped_pts,
+            &target_pts_arr,
+            &target_normals,
+            &kdtree,
+            Array2::eye(4),
+            40,
+            0.015,
+            DEFAULT_SAMPLE_SIZE,
+            DEFAULT_TRIM_PERCENTAGE,
+        )?;
+
+        // 4. 最終的な点群位置を計算
+        let mut h = Array2::<f64>::ones((transformed_flipped_pts.nrows(), 4));
+        h.slice_mut(s![.., 0..3]).assign(&transformed_flipped_pts);
+        let final_homo = h.dot(&icp_tf.t());
+        let final_pts = final_homo.slice(s![.., 0..3]).to_owned();
+
+        // 5. 全体の変換行列を計算（デバッグ用）
+        // 実際には使わないが、記録のため
+        let combined_tf = icp_tf.clone();
+
+        candidates.push((label, final_pts, icp_rmse, combined_tf));
+        println!("Hypothesis [{}]: RMSE = {:.6}", label, icp_rmse);
+    }
+
+    // ベストな候補を選択
     let mut best_rmse = f64::MAX;
     let mut best_label = String::from("None");
-    let mut best_final_pts = Array2::<f64>::zeros((0, 3)); // 最終的な点群保持用
+    let mut best_final_pts = Array2::<f64>::zeros((0, 3));
     let mut best_tf = Array2::<f64>::eye(4);
 
-    println!("--- Starting Hypothesis Verification ---");
-
-    for (label, pts, pre_calced_rmse) in candidates {
-        let (final_pts, rmse) = if label == "Original" {
-            // Originalは既にICP済みなのでそのまま採用
-            (pts, pre_calced_rmse)
-        } else {
-            // 反転・回転させた候補に対して、仕上げのICPを実行
-            // 初期姿勢は Identity (既に反転などで移動済みのため)
-            let (refine_tf, refine_rmse) = perform_icp_point_to_plane(
-                &pts, // 反転済みの点群を入力
-                &target_pts_arr,
-                &target_normals,
-                &kdtree,
-                Array2::eye(4), // initial_transform
-                40,             // max_iterations (仕上げなので多めでもOK)
-                0.015,          // tolerance
-                DEFAULT_SAMPLE_SIZE,
-                DEFAULT_TRIM_PERCENTAGE,
-            )?;
-
-            // 仕上げICPの結果を点群に適用
-            let mut h = Array2::<f64>::ones((pts.nrows(), 4));
-            h.slice_mut(s![.., 0..3]).assign(&pts);
-            let refined_h = h.dot(&refine_tf.t());
-            let refined_pts = refined_h.slice(s![.., 0..3]).to_owned();
-
-            (refined_pts, refine_rmse)
-        };
-
-        println!("Hypothesis [{}]: Final RMSE = {:.6}", label, rmse);
-
-        // ベストスコア更新チェック
+    for (label, pts, rmse, tf) in candidates {
         if rmse < best_rmse {
             best_rmse = rmse;
             best_label = label.to_string();
-            best_final_pts = final_pts;
-            best_tf = final_transform.clone();
+            best_final_pts = pts;
+            best_tf = tf;
         }
     }
 
@@ -202,6 +220,128 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// 反転・回転の変換行列を生成する関数群
+fn create_lr_flip_matrix() -> Array2<f64> {
+    // Y軸に対する鏡像反転 (左右反転)
+    // 注意: 鏡像反転は行列式が-1になるため、pure rotationではない
+    arr2(&[
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_ud_flip_matrix() -> Array2<f64> {
+    // Z軸に対する鏡像反転 (上下反転)
+    arr2(&[
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_fb_flip_matrix() -> Array2<f64> {
+    // X軸に対する鏡像反転 (前後反転)
+    arr2(&[
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_180_z_matrix() -> Array2<f64> {
+    // Z軸周りの180度回転
+    arr2(&[
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_180_y_matrix() -> Array2<f64> {
+    // Y軸周りの180度回転
+    arr2(&[
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_180_x_matrix() -> Array2<f64> {
+    // X軸周りの180度回転
+    arr2(&[
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_90_x_matrix() -> Array2<f64> {
+    // X軸周りの90度回転 (右手系)
+    arr2(&[
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_minus_90_x_matrix() -> Array2<f64> {
+    // X軸周りの-90度回転
+    arr2(&[
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_90_y_matrix() -> Array2<f64> {
+    // Y軸周りの90度回転
+    arr2(&[
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_minus_90_y_matrix() -> Array2<f64> {
+    // Y軸周りの-90度回転
+    arr2(&[
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_90_z_matrix() -> Array2<f64> {
+    // Z軸周りの90度回転
+    arr2(&[
+        [0.0, -1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+fn create_rot_minus_90_z_matrix() -> Array2<f64> {
+    // Z軸周りの-90度回転
+    arr2(&[
+        [0.0, 1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
 }
 
 fn reverse_pcd(
