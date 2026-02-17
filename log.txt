@@ -1,0 +1,111 @@
+Loaded Target: 11107 pts, Source: 7663 pts
+Source point cloud centered to target centroid.
+Building k-d tree & Calculating Normals...
+Preparation complete.
+Iter 1: RMSE = 0.976179 (Inliers: 7200)
+Iter 5: RMSE = 0.464305 (Inliers: 7200)
+Iter 10: RMSE = 0.416810 (Inliers: 7200)
+Iter 15: RMSE = 0.415815 (Inliers: 7200)
+Iter 20: RMSE = 0.411719 (Inliers: 7200)
+ICP function completed in 77.70ms
+ICP Result: RMSE = 0.411719
+Final Transform:
+[[0.6745720713456044, -0.3817800497170885, -0.6318200014232838, 0.5308703955354565],
+ [-0.20706698355472358, 0.7236648492280023, -0.6583558690505915, 0.25971896532464694],
+ [0.7085730624868898, 0.5749375441122536, 0.409110053027448, -0.1710349625934604],
+ [0.0, 0.0, 0.0, 1.0]], shape=[4, 4], strides=[4, 1], layout=Cc (0x5), const ndim=2
+
+--- Starting Hypothesis Verification (from original source) ---
+Iter 1: RMSE = 0.918715 (Inliers: 7200)
+Iter 5: RMSE = 0.619660 (Inliers: 7200)
+Iter 10: RMSE = 0.577977 (Inliers: 7200)
+Iter 15: RMSE = 0.587219 (Inliers: 7200)
+Iter 20: RMSE = 0.546670 (Inliers: 7200)
+Iter 25: RMSE = 0.532092 (Inliers: 7200)
+Iter 30: RMSE = 0.512425 (Inliers: 7200)
+Iter 35: RMSE = 0.452016 (Inliers: 7200)
+Iter 40: RMSE = 0.377598 (Inliers: 7200)
+ICP function completed in 182.38ms
+Hypothesis [LR_Flip_Reverse-Y]: RMSE = 0.377598
+Iter 1: RMSE = 0.949429 (Inliers: 7200)
+Iter 5: RMSE = 0.430751 (Inliers: 7200)
+Iter 10: RMSE = 0.359268 (Inliers: 7200)
+Iter 15: RMSE = 0.325409 (Inliers: 7200)
+Iter 20: RMSE = 0.309637 (Inliers: 7200)
+Iter 25: RMSE = 0.303959 (Inliers: 7200)
+Iter 30: RMSE = 0.301435 (Inliers: 7200)
+Iter 35: RMSE = 0.301354 (Inliers: 7200)
+Iter 40: RMSE = 0.300921 (Inliers: 7200)
+ICP function completed in 176.35ms
+Hypothesis [UD_Flip_Reverse-Z]: RMSE = 0.300921
+Iter 1: RMSE = 0.953943 (Inliers: 7200)
+Iter 5: RMSE = 0.673790 (Inliers: 7200)
+Iter 10: RMSE = 0.549551 (Inliers: 7200)
+Iter 15: RMSE = 0.528335 (Inliers: 7200)
+Iter 20: RMSE = 0.481638 (Inliers: 7200)
+Iter 25: RMSE = 0.475550 (Inliers: 7200)
+Iter 30: RMSE = 0.467046 (Inliers: 7200)
+Iter 35: RMSE = 0.459710 (Inliers: 7200)
+Iter 40: RMSE = 0.441404 (Inliers: 7200)
+ICP function completed in 176.22ms
+Hypothesis [Front-Back_Flip_Reverse-X]: RMSE = 0.441404
+Iter 1: RMSE = 0.940456 (Inliers: 7200)
+Iter 5: RMSE = 0.463273 (Inliers: 7200)
+Iter 10: RMSE = 0.402413 (Inliers: 7200)
+Iter 15: RMSE = 0.394580 (Inliers: 7200)
+Iter 20: RMSE = 0.393840 (Inliers: 7200)
+Iter 25: RMSE = 0.392010 (Inliers: 7200)
+Iter 30: RMSE = 0.392943 (Inliers: 7200)
+Iter 35: RMSE = 0.392324 (Inliers: 7200)
+Iter 40: RMSE = 0.389888 (Inliers: 7200)
+ICP function completed in 187.61ms
+Hypothesis [Rot_180_Z]: RMSE = 0.389888
+Iter 1: RMSE = 0.923262 (Inliers: 7200)
+Iter 5: RMSE = 0.653891 (Inliers: 7200)
+Iter 10: RMSE = 0.602886 (Inliers: 7200)
+Iter 15: RMSE = 0.588550 (Inliers: 7200)
+Iter 20: RMSE = 0.565601 (Inliers: 7200)
+Iter 25: RMSE = 0.545321 (Inliers: 7200)
+Iter 30: RMSE = 0.525369 (Inliers: 7200)
+Iter 35: RMSE = 0.514903 (Inliers: 7200)
+Iter 40: RMSE = 0.484829 (Inliers: 7200)
+ICP function completed in 217.84ms
+Hypothesis [Rot_180_Y]: RMSE = 0.484829
+Iter 1: RMSE = 0.935132 (Inliers: 7200)
+Iter 5: RMSE = 0.680835 (Inliers: 7200)
+Iter 10: RMSE = 0.614875 (Inliers: 7200)
+Iter 15: RMSE = 0.512170 (Inliers: 7200)
+Iter 20: RMSE = 0.494988 (Inliers: 7200)
+Iter 25: RMSE = 0.500524 (Inliers: 7200)
+Iter 30: RMSE = 0.449135 (Inliers: 7200)
+Iter 35: RMSE = 0.397096 (Inliers: 7200)
+Iter 40: RMSE = 0.364723 (Inliers: 7200)
+ICP function completed in 212.30ms
+Hypothesis [Rot_180_X]: RMSE = 0.364723
+Iter 1: RMSE = 0.930126 (Inliers: 7200)
+Iter 5: RMSE = 0.681477 (Inliers: 7200)
+Iter 10: RMSE = 0.621270 (Inliers: 7200)
+Iter 15: RMSE = 0.526109 (Inliers: 7200)
+Iter 20: RMSE = 0.491820 (Inliers: 7200)
+Iter 25: RMSE = 0.511158 (Inliers: 7200)
+Iter 30: RMSE = 0.455048 (Inliers: 7200)
+Iter 35: RMSE = 0.406266 (Inliers: 7200)
+Iter 40: RMSE = 0.370133 (Inliers: 7200)
+ICP function completed in 192.64ms
+Hypothesis [LR+UD_Flip]: RMSE = 0.370133
+Iter 1: RMSE = 0.942845 (Inliers: 7200)
+Iter 5: RMSE = 0.463594 (Inliers: 7200)
+Iter 10: RMSE = 0.404472 (Inliers: 7200)
+Iter 15: RMSE = 0.392898 (Inliers: 7200)
+Iter 20: RMSE = 0.391894 (Inliers: 7200)
+Iter 25: RMSE = 0.391383 (Inliers: 7200)
+Iter 30: RMSE = 0.393299 (Inliers: 7200)
+Iter 35: RMSE = 0.387004 (Inliers: 7200)
+Iter 40: RMSE = 0.389083 (Inliers: 7200)
+ICP function completed in 192.09ms
+Hypothesis [LR+FB_Flip]: RMSE = 0.389083
+Iter 1: RMSE = 0.921878 (Inliers: 7200)
+Iter 5: RMSE = 0.652756 (Inliers: 7200)
+Iter 10: RMSE = 0.599235 (Inliers: 7200)
+Iter 15: RMSE = 0.586725 (Inliers: 7200)
+Iter 20: RMSE = 0.567740 (Inliers: 7200)

@@ -1,25 +1,37 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use icp_practice::operate_pcd::{
-    PointXYZ, Points, load_pcd_xyz, save_pcd,
-};
+use icp_practice::operate_pcd::{PointXYZ, Points, load_pcd_xyz, save_pcd};
 use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};
 // use plotters::prelude::*;
 use ndarray::prelude::*;
 use ndarray_linalg::{SVD, Solve};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 // use rayon::prelude::*;
 
-const TARGET_PCD_PATH: &str = "data/input/aist/aist-voxelized-025.pcd";
-const SOURCE_PCD_PATH: &str = "data/input/aist/vggt-sansouken-room-scale-7_5_voxel_025_xyz_only.pcd";
+const TARGET_PCD_PATH: &str = "data/input/H927/lidar-target.pcd";
+const SOURCE_PCD_PATH: &str = "data/input/H927/vggt-source.pcd";
+// const TARGET_PCD_PATH: &str = "/workspace/input/lidar-target.pcd";
+// const SOURCE_PCD_PATH: &str = "/workspace/input/vggt-source.pcd";
+const OUTPUT_PATH: &str = "data/output/test";
+// const OUTPUT_PATH: &str = "/workspace/output";
+
 const DEFAULT_SAMPLE_SIZE: usize = 7200;
 const DEFAULT_TRIM_PERCENTAGE: f64 = 1.0;
 const K_NEIGHBORS: usize = 15;
 const INIT_ICP_MAX_ITERATIONS: usize = 20;
 const SECOND_ICP_MAX_ITERATIONS: usize = 40;
 const TOLERANCE: f64 = 0.015;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ICPStatResult {
+    label: String,
+    save_pcd_path: String,
+    rmse: f64,
+    transform: Vec<Vec<f64>>,
+}
 
 fn main() -> Result<()> {
     let target_pcd_file_path = TARGET_PCD_PATH;
@@ -100,30 +112,42 @@ fn main() -> Result<()> {
     // --- 5. 反転・回転候補の作成と評価 ---
     // 元のsource点群に対して反転・回転を適用してから、重心合わせ→ICPを実行
     println!("\n--- Starting Hypothesis Verification (from original source) ---");
-    
+
     // 反転・回転の変換行列を4x4行列として定義
     let flip_rot_transforms = vec![
-        ("LR Flip (Y反転)", create_lr_flip_matrix()),
-        ("UD Flip (Z反転)", create_ud_flip_matrix()),
-        ("Front-Back Flip (X反転)", create_fb_flip_matrix()),
-        ("Rot 180 Z", create_rot_180_z_matrix()),
-        ("Rot 180 Y", create_rot_180_y_matrix()),
-        ("Rot 180 X", create_rot_180_x_matrix()),
-        ("LR+UD Flip", create_lr_flip_matrix().dot(&create_ud_flip_matrix())),
-        ("LR+FB Flip", create_lr_flip_matrix().dot(&create_fb_flip_matrix())),
-        ("UD+FB Flip", create_ud_flip_matrix().dot(&create_fb_flip_matrix())),
-        ("Rot90 X", create_rot_90_x_matrix()),
-        ("Rot-90 X", create_rot_minus_90_x_matrix()),
-        ("Rot90 Y", create_rot_90_y_matrix()),
-        ("Rot-90 Y", create_rot_minus_90_y_matrix()),
-        ("Rot90 Z", create_rot_90_z_matrix()),
-        ("Rot-90 Z", create_rot_minus_90_z_matrix()),
+        ("LR_Flip_Reverse-Y", create_lr_flip_matrix()),
+        ("UD_Flip_Reverse-Z", create_ud_flip_matrix()),
+        ("Front-Back_Flip_Reverse-X", create_fb_flip_matrix()),
+        ("Rot_180_Z", create_rot_180_z_matrix()),
+        ("Rot_180_Y", create_rot_180_y_matrix()),
+        ("Rot_180_X", create_rot_180_x_matrix()),
+        (
+            "LR+UD_Flip",
+            create_lr_flip_matrix().dot(&create_ud_flip_matrix()),
+        ),
+        (
+            "LR+FB_Flip",
+            create_lr_flip_matrix().dot(&create_fb_flip_matrix()),
+        ),
+        (
+            "UD+FB_Flip",
+            create_ud_flip_matrix().dot(&create_fb_flip_matrix()),
+        ),
+        ("Rot_90_X", create_rot_90_x_matrix()),
+        ("Rot_-90_X", create_rot_minus_90_x_matrix()),
+        ("Rot_90_Y", create_rot_90_y_matrix()),
+        ("Rot_-90_Y", create_rot_minus_90_y_matrix()),
+        ("Rot_90_Z", create_rot_90_z_matrix()),
+        ("Rot_-90_Z", create_rot_minus_90_z_matrix()),
     ];
 
     // 候補点群を生成（元のsourceに対して反転・回転を適用）
-    let mut candidates = vec![
-        ("Original", base_aligned_pts.clone(), final_rmse, final_transform.clone()),
-    ];
+    let mut candidates = vec![(
+        "Original",
+        base_aligned_pts.clone(),
+        final_rmse,
+        final_transform.clone(),
+    )];
 
     for (label, flip_rot_matrix) in flip_rot_transforms {
         // 1. 元のsource点群に反転・回転変換を適用
@@ -161,33 +185,99 @@ fn main() -> Result<()> {
         println!("Hypothesis [{}]: RMSE = {:.6}", label, icp_rmse);
     }
 
+    let elapsed = start.elapsed();
+
     // ベストな候補を選択
     let mut best_rmse = f64::MAX;
     let mut best_label = String::from("None");
     let mut best_final_pts = Array2::<f64>::zeros((0, 3));
     let mut best_tf = Array2::<f64>::eye(4);
 
-    for (label, pts, rmse, tf) in candidates {
+    for (label, pts, rmse, tf) in candidates.clone() {
+        // Select the best transform
         if rmse < best_rmse {
             best_rmse = rmse;
             best_label = label.to_string();
-            best_final_pts = pts;
-            best_tf = tf;
+            best_final_pts = pts.clone();
+            best_tf = tf.clone();
         }
     }
 
-    println!("----------------------------------------");
+    let mut icp_stat_results: Vec<ICPStatResult> = Vec::new();
+
+    println!("\n=== Saving each transformed point cloud ===");
+    for (label, pts, rmse, tf) in candidates {
+        // Save each transformed data
+        let aligned_source_pts = array2_to_points(&pts.to_owned());
+        let colored_aligned_source_pts = aligned_source_pts.transform_colored_points((0, 255, 0)); // Green
+        let colored_target_pts = target_pts.transform_colored_points((0, 0, 255)); // Blue
+        let colored_source_pts = source_pts.transform_colored_points((255, 0, 0)); // Red
+
+        let mut all_points = colored_target_pts.clone();
+        all_points.extend(colored_aligned_source_pts.clone());
+        all_points.extend(colored_source_pts.clone());
+
+        let save_path = format!(
+            "{}/debug/{}.pcd",
+            OUTPUT_PATH,
+            format!("icp-aligned-by-{}", label)
+        );
+        match save_pcd(&all_points, &save_path) {
+            Ok(_) => println!("Saved aligned points to {}", save_path),
+            Err(e) => eprintln!("Failed to save PCD file: {}", e),
+        }
+
+        icp_stat_results.push(ICPStatResult {
+            label: label.to_string(),
+            save_pcd_path: save_path,
+            rmse: rmse,
+            transform: tf
+                .clone()
+                .into_raw_vec()
+                .chunks(4)
+                .map(|row| row.to_vec())
+                .collect(),
+        });
+    }
+    println!("==========================================");
+
+    println!("\n=== Saving ICP statistics results ===");
+    // Serialize ICP statistics to JSON
+    let icp_stat_json = serde_json::to_string_pretty(&icp_stat_results)?;
+    let icp_stat_save_path = format!("{}/{}", OUTPUT_PATH, "icp-all-stat-results.json");
+    std::fs::write(&icp_stat_save_path, icp_stat_json)?;
+    println!("Saved ICP statistics to {}", icp_stat_save_path);
+    println!("==========================================");
+
+    println!("\n=== Best ICP Result ===");
     println!("Best: {} (RMSE: {:.6})", best_label, best_rmse);
     println!("Best Transform:\n{:?}", best_tf);
-    let elapsed = start.elapsed();
     println!("Elapsed time: {:.2?}", elapsed);
 
+    icp_stat_results.clear();
+    icp_stat_results.push(ICPStatResult {
+        label: best_label.clone(),
+        save_pcd_path: format!("{}/results/{}.pcd", OUTPUT_PATH, "icp-aligned_best-result"),
+        rmse: best_rmse,
+        transform: best_tf
+            .clone()
+            .into_raw_vec()
+            .chunks(4)
+            .map(|row| row.to_vec())
+            .collect(),
+    });
+    let best_stat_json = serde_json::to_string_pretty(&icp_stat_results)?;
+    let best_stat_save_path = format!("{}/results/{}", OUTPUT_PATH, "icp-best-stat-result.json");
+    std::fs::write(&best_stat_save_path, best_stat_json)?;
+    println!("Saved best ICP statistics to {}", best_stat_save_path);
+    println!("==========================================");
+
     let aligned_source_pts = array2_to_points(&best_final_pts.to_owned());
-    let colored_target_pts = target_pts.transform_colored_points((0, 0, 255)); // 青
-    let colored_source_pts = source_pts.transform_colored_points((255, 0, 0)); // 赤
-    let colored_aligned_source_pts = aligned_source_pts.transform_colored_points((0, 255, 0)); // 緑
+    let colored_target_pts = target_pts.transform_colored_points((0, 0, 255)); // Blue
+    let colored_source_pts = source_pts.transform_colored_points((255, 0, 0)); // Red
+    let colored_aligned_source_pts = aligned_source_pts.transform_colored_points((0, 255, 0)); // Green
     let colored_transformed_source_pts = array2_to_points(&transformed_source_pts_arr.to_owned())
-        .transform_colored_points((255, 255, 0)); // 黄色
+        .transform_colored_points((255, 255, 0)); // Yellow
 
     let mut all_points = colored_target_pts.clone();
     all_points.extend(colored_aligned_source_pts.clone());
@@ -198,14 +288,17 @@ fn main() -> Result<()> {
     all_points.extend(colored_transformed_source_pts.clone());
 
     // Save each point clouds
-    let save_path = "data/output/aist/icp_aligned_all_result_v-025.pcd";
-    match save_pcd(&all_points, save_path) {
+    let save_path = format!(
+        "{}/results/{}.pcd",
+        OUTPUT_PATH, "icp-aligned_best-result-with-centering"
+    );
+    match save_pcd(&all_points, &save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
     }
 
-    let save_path = "data/output/aist/icp_aligned_result_v-025.pcd";
-    match save_pcd(&all_points_without_centering, save_path) {
+    let save_path = format!("{}/results/{}.pcd", OUTPUT_PATH, "icp-aligned_best-result");
+    match save_pcd(&all_points_without_centering, &save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
     }
@@ -578,7 +671,7 @@ fn calculate_transformation_pt_to_plane(
     let at_a = a.t().dot(&a);
     // at_b は (6xN) * (Nx1) = (6x1)
     let at_b = a.t().dot(&b);
-    
+
     // x = (A^T A)^-1 * (A^T b)
     let x = at_a
         .solve(&at_b)
