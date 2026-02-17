@@ -2,8 +2,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use icp_practice::operate_pcd::{
-    PointXYZ, PointXYZNormal, Points, load_pcd_xyz, load_pcd_xyzrgb, save_pcd,
-    save_pcd_with_normals,
+    PointXYZ, Points, load_pcd_xyz, save_pcd,
 };
 use kdtree::{KdTree, distance::squared_euclidean};
 use ndarray_rand::rand::{seq::SliceRandom, thread_rng};

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ndarray::prelude::*;
-use pcd_rs::{PcdDeserialize, PcdSerialize, Reader, WriterInit};
+use pcd_rs::{PcdDeserialize, PcdSerialize, Reader};
 
 #[derive(Debug, Clone, PcdDeserialize, PcdSerialize)]
 pub struct PointXYZ {
