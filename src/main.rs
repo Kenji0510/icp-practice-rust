@@ -121,18 +121,18 @@ fn main() -> Result<()> {
         ("Rot_180_Z", create_rot_180_z_matrix()),
         ("Rot_180_Y", create_rot_180_y_matrix()),
         ("Rot_180_X", create_rot_180_x_matrix()),
-        (
-            "LR+UD_Flip",
-            create_lr_flip_matrix().dot(&create_ud_flip_matrix()),
-        ),
-        (
-            "LR+FB_Flip",
-            create_lr_flip_matrix().dot(&create_fb_flip_matrix()),
-        ),
-        (
-            "UD+FB_Flip",
-            create_ud_flip_matrix().dot(&create_fb_flip_matrix()),
-        ),
+        // (
+        //     "LR+UD_Flip",
+        //     create_lr_flip_matrix().dot(&create_ud_flip_matrix()),
+        // ),
+        // (
+        //     "LR+FB_Flip",
+        //     create_lr_flip_matrix().dot(&create_fb_flip_matrix()),
+        // ),
+        // (
+        //     "UD+FB_Flip",
+        //     create_ud_flip_matrix().dot(&create_fb_flip_matrix()),
+        // ),
         ("Rot_90_X", create_rot_90_x_matrix()),
         ("Rot_-90_X", create_rot_minus_90_x_matrix()),
         ("Rot_90_Y", create_rot_90_y_matrix()),
