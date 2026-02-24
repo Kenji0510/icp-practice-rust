@@ -11,11 +11,11 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 // use rayon::prelude::*;
 
-const TARGET_PCD_PATH: &str = "data/input/H927/lidar-target.pcd";
-const SOURCE_PCD_PATH: &str = "data/input/H927/vggt-source.pcd";
+const TARGET_PCD_PATH: &str = "/workspace/input/lidar-target.pcd";
+const SOURCE_PCD_PATH: &str = "/workspace/input/vggt-source.pcd";
 // const TARGET_PCD_PATH: &str = "/workspace/input/lidar-target.pcd";
 // const SOURCE_PCD_PATH: &str = "/workspace/input/vggt-source.pcd";
-const OUTPUT_PATH: &str = "data/output/test";
+const OUTPUT_PATH: &str = "/workspace/output";
 // const OUTPUT_PATH: &str = "/workspace/output";
 
 const DEFAULT_SAMPLE_SIZE: usize = 7200;
@@ -218,7 +218,7 @@ fn main() -> Result<()> {
         all_points.extend(colored_source_pts.clone());
 
         let save_path = format!(
-            "{}/debug/{}.pcd",
+            "{}/{}.pcd",
             OUTPUT_PATH,
             format!("icp-aligned-by-{}", label)
         );
@@ -257,7 +257,7 @@ fn main() -> Result<()> {
     icp_stat_results.clear();
     icp_stat_results.push(ICPStatResult {
         label: best_label.clone(),
-        save_pcd_path: format!("{}/results/{}.pcd", OUTPUT_PATH, "icp-aligned_best-result"),
+        save_pcd_path: format!("{}/{}.pcd", OUTPUT_PATH, "icp-aligned_best-result"),
         rmse: best_rmse,
         transform: best_tf
             .clone()
@@ -267,7 +267,7 @@ fn main() -> Result<()> {
             .collect(),
     });
     let best_stat_json = serde_json::to_string_pretty(&icp_stat_results)?;
-    let best_stat_save_path = format!("{}/results/{}", OUTPUT_PATH, "icp-best-stat-result.json");
+    let best_stat_save_path = format!("{}/{}", OUTPUT_PATH, "icp-best-stat-result.json");
     std::fs::write(&best_stat_save_path, best_stat_json)?;
     println!("Saved best ICP statistics to {}", best_stat_save_path);
     println!("==========================================");
@@ -289,7 +289,7 @@ fn main() -> Result<()> {
 
     // Save each point clouds
     let save_path = format!(
-        "{}/results/{}.pcd",
+        "{}/{}.pcd",
         OUTPUT_PATH, "icp-aligned_best-result-with-centering"
     );
     match save_pcd(&all_points, &save_path) {
@@ -297,7 +297,7 @@ fn main() -> Result<()> {
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
     }
 
-    let save_path = format!("{}/results/{}.pcd", OUTPUT_PATH, "icp-aligned_best-result");
+    let save_path = format!("{}/{}.pcd", OUTPUT_PATH, "icp-aligned_best-result");
     match save_pcd(&all_points_without_centering, &save_path) {
         Ok(_) => println!("Saved aligned points to {}", save_path),
         Err(e) => eprintln!("Failed to save PCD file: {}", e),
