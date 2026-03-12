@@ -11,11 +11,11 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 // use rayon::prelude::*;
 
+// const TARGET_PCD_PATH: &str = "data/input/H927/lidar-target.pcd";
+// const SOURCE_PCD_PATH: &str = "data/input/H927/vggt-source.pcd";
 const TARGET_PCD_PATH: &str = "/workspace/input/lidar-target.pcd";
 const SOURCE_PCD_PATH: &str = "/workspace/input/vggt-source.pcd";
-// const TARGET_PCD_PATH: &str = "/workspace/input/lidar-target.pcd";
-// const SOURCE_PCD_PATH: &str = "/workspace/input/vggt-source.pcd";
-const OUTPUT_PATH: &str = "/workspace/output";
+const OUTPUT_PATH: &str = "data/output";
 // const OUTPUT_PATH: &str = "/workspace/output";
 
 const DEFAULT_SAMPLE_SIZE: usize = 7200;
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
     );
 
     // === Centroid Alignment) ===
-    let (initial_translation, transformed_source_pts_arr) =
+    let (_, transformed_source_pts_arr) =
         registration_pcd_center(&source_pts_arr, &target_pts_arr);
     println!("Source point cloud centered to target centroid.");
 
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
         .slice_mut(s![.., 0..3])
         .assign(&transformed_source_pts_arr);
 
-    let final_transformed_homogeneous = source_homogeneous.dot(&final_transform.t());
+    let _ = source_homogeneous.dot(&final_transform.t());
     // let final_aligned_source_pts_arr = final_transformed_homogeneous.slice(s![.., 0..3]);
 
     let n_points_source = transformed_source_pts_arr.nrows();
@@ -425,47 +425,6 @@ fn create_rot_minus_90_z_matrix() -> Array2<f64> {
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ])
-}
-
-fn reverse_pcd(
-    points: &Array2<f64>,
-) -> (
-    Array2<f64>,
-    Array2<f64>,
-    Array2<f64>,
-    Array2<f64>,
-    Array2<f64>,
-) {
-    // 1. 左右反転 (Y軸反転 - YZ平面に対する鏡像)
-    let mut mirror_lr = points.clone();
-    mirror_lr.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
-
-    // 2. 上下反転 (Z軸反転 - XY平面に対する鏡像)
-    let mut mirror_ud = points.clone();
-    mirror_ud.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
-
-    // 3. Z軸周りの180度回転 (X-Y平面上での180度回転)
-    let mut rotate_180_z = points.clone();
-    rotate_180_z.slice_mut(s![.., 0]).mapv_inplace(|x| -x);
-    rotate_180_z.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
-
-    // 4. Y軸周りの180度回転 (前後反転)
-    let mut rotate_180_y = points.clone();
-    rotate_180_y.slice_mut(s![.., 0]).mapv_inplace(|x| -x);
-    rotate_180_y.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
-
-    // 5. X軸周りの180度回転 (天地前後反転)
-    let mut rotate_180_x = points.clone();
-    rotate_180_x.slice_mut(s![.., 1]).mapv_inplace(|y| -y);
-    rotate_180_x.slice_mut(s![.., 2]).mapv_inplace(|z| -z);
-
-    (
-        mirror_lr,
-        mirror_ud,
-        rotate_180_z,
-        rotate_180_y,
-        rotate_180_x,
-    )
 }
 
 fn perform_icp_point_to_plane(
